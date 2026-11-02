@@ -1,0 +1,57 @@
+﻿Guitar Hero: Warriors of Rock - recompilacion estatica para PC
+===============================================================
+
+Necesitas tu propio ISO de Guitar Hero: Warriors of Rock para Xbox 360 (version USA/Europa).
+Este paquete no contiene ningun archivo del juego.
+
+Primer arranque
+---------------
+1. Ejecuta GH6WoR.exe. Se abre el launcher (ventana de configuracion).
+2. En "Juego" elige el ISO del juego con "Examinar..." y, si tienes DLC, su carpeta.
+3. Ajusta graficos, controles por jugador y microfono, y pulsa JUGAR. Todo se guarda en gh6.ini.
+   Las partidas se guardan en la carpeta userdata.
+Para entrar directo al juego desactiva "Mostrar este launcher al iniciar" (mantener Mayus al abrir
+GH6WoR.exe lo vuelve a mostrar). GH6WoR.exe --jugar salta el launcher y --launcher lo abre siempre.
+
+DLC
+---
+Copia tus paquetes de contenido descargable de Xbox 360 (archivos STFS: LIVE/PIRS/CON,
+por ejemplo 41560883\00000002\<archivo>) dentro de la carpeta dlc (puede tener subcarpetas).
+Se importan solos la primera vez que arranca el juego (puede tardar unos segundos por paquete).
+
+Controles
+---------
+- Mando o guitarra de Xbox 360 por XInput: se detectan solos (la guitarra se presenta como tal).
+- Teclado:
+    1 2 3 4 5        trastes verde, rojo, amarillo, azul y naranja
+    Flechas arriba/abajo   puas (strum) y navegacion
+    Flechas izq./der.      navegacion
+    Enter            Start
+    Retroceso        Back (Star Power)
+    Espacio / Esc    A / B
+    Q / E            gatillos
+
+Sincronia: calibra una vez en el juego (Options > Calibrate Lag > Calibrate). En el launcher, "Latencia del
+audio" baja el retraso del sonido (Baja ~40 ms / Normal ~55 ms / Segura ~95 ms, sin contar tarjeta y tele).
+Si se desconecta un mando durante una cancion el juego pausa y avisa; al reconectarlo se sigue
+(el jugador del teclado tambien puede seguir pulsando una tecla).
+Pantalla completa: F11 o Alt+Enter. F6 cambia el instrumento del jugador del teclado.
+Varios jugadores: cada mando XInput es un jugador y en el launcher (Controles) eliges el instrumento
+de cada uno (guitarra, bateria o voz). Un mando normal se convierte en guitarra o bateria; los botones
+se reasignan pulsando "Asignar..." y el boton del mando. El microfono de Windows va al primer jugador
+con voz. Los jugadores 2 a 4 entran como invitados: en el aviso de perfil elige "Continue without saving".
+
+Configuracion (gh6.ini)
+-----------------------
+  iso=   ruta al ISO
+  datos= carpeta de datos (partidas, DLC importado)
+  dlc=   carpeta donde buscar paquetes de DLC
+
+Opciones de diagnostico (variables de entorno)
+----------------------------------------------
+  GH6_NOAUDIO=1     sin sonido
+  GH6_NOXINPUT=1    sin mando XInput
+  GH6_STDERR=1      el registro va a la consola en vez de gh6.log
+
+Licencias: FFmpeg (avcodec, avutil, swresample) bajo LGPL 2.1+; partes del comportamiento de la GPU
+y del kernel se basan en la documentacion y el codigo de Xenia (BSD).

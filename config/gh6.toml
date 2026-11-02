@@ -1,0 +1,56 @@
+# XenonRecomp - Guitar Hero: Warriors of Rock (X360, 41560883)
+[main]
+file_path = "../xex/default.xex"
+out_directory_path = "../ppc"
+switch_table_file_path = "gh6_switch_tables_all.toml"
+
+# Optimizaciones desactivadas hasta tener una recompilacion que funcione
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+restgprlr_14_address = 0x826ABBA0
+savegprlr_14_address = 0x826ABB50
+restfpr_14_address   = 0x826ABDCC
+savefpr_14_address   = 0x826ABD80
+restvmx_14_address   = 0x826AD188
+savevmx_14_address   = 0x826ACEF0
+restvmx_64_address   = 0x826AD21C
+savevmx_64_address   = 0x826ACF84
+
+longjmp_address = 0x82798C70
+setjmp_address  = 0x82798F90
+
+functions = [
+    { address = 0x822A8EE8, size = 0x1B8 },
+    { address = 0x822F3028, size = 0x100 },
+    { address = 0x822F5AC8, size = 0xD8 },
+    { address = 0x82349750, size = 0x1D8 },
+    { address = 0x823619C8, size = 0x14C },
+    { address = 0x8237FCD8, size = 0x174 },
+    { address = 0x8239B040, size = 0x20C },
+    { address = 0x823D9428, size = 0x350 },
+    { address = 0x823E34F8, size = 0x270 },
+    { address = 0x823E4140, size = 0x110 },
+    { address = 0x823E4250, size = 0xFC },
+    { address = 0x824034B8, size = 0xD8 },
+    { address = 0x82403590, size = 0xA8 },
+    { address = 0x824A1570, size = 0x13C },
+    { address = 0x82519BD0, size = 0x130 },
+    { address = 0x8256A458, size = 0x7C },
+    { address = 0x82576EF8, size = 0x2AC },
+    { address = 0x825B87A0, size = 0x78 },
+    { address = 0x825B8BB8, size = 0x90 },
+    { address = 0x82612D58, size = 0x1B8 },
+    { address = 0x826194D8, size = 0x91C },
+    { address = 0x82650B48, size = 0x160 },
+    { address = 0x8266FFE8, size = 0x498 },
+    { address = 0x82678488, size = 0x110 },
+    { address = 0x826A33F0, size = 0x4C4 },
+    { address = 0x827716A8, size = 0x3FC },
+]

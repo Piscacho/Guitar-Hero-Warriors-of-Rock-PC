@@ -1,0 +1,29 @@
+# ---- Archivos del juego: NUNCA se suben ----
+*.iso
+*.xex
+xex/
+basefile.bin
+# Codigo generado a partir del ejecutable del juego (cada uno lo genera desde su ISO)
+ppc/
+shaders_dis.txt
+*.bin
+*.cso
+
+# ---- Herramientas descargables y salidas de compilacion ----
+toolchain/
+ref/
+project/build/
+release_staging/
+dist/
+
+# ---- Pruebas, capturas y registros ----
+run/
+logs/
+rea/
+/*.png
+/*.wav
+*.bmp
+*.log
+*.zip
+*.old
+__pycache__/

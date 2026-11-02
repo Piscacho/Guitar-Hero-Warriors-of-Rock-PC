@@ -22,6 +22,7 @@ Controles
 - Los jugadores 2 a 4 entran como invitados: en el aviso de perfil elige "Continue without saving".
 - F6 cambia el instrumento del jugador del teclado. F11 o Alt+Enter: pantalla completa. F12: captura.
 - Preajustes del mando de Xbox en Controles -> Preajustes: clasico (A/B/Y/X/LB) o gatillos (LT/LB/RB/RT/A).
+- Guitarra CRKD (Gibson Les Paul): Controles -> Preajustes -> "Guitarra CRKD" (palanca en LT, inclinacion en RT).
 - Guitarra de otra marca que no responde bien: Controles -> "Informe de mandos" genera mandos.txt con lo que
   envia; con ese archivo se puede configurar.
 - Teclado: flechas, Enter = Start, Retroceso = poder estrella, 1-5 = trastes (Espacio = verde,

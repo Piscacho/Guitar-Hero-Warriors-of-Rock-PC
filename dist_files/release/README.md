@@ -18,7 +18,8 @@ Recompilación estática para PC de **Guitar Hero: Warriors of Rock** (Xbox 360,
 - **Controles**: un mando de Xbox o de PlayStation se convierte en guitarra o batería (o mando normal para la voz),
   con preajustes para el mando de Xbox (clásico o con gatillos). Las guitarras y baterías XInput para PC se detectan
   solas. Hasta 4 jugadores, cada uno con su instrumento, y botones reasignables (comunes o por jugador) en **Controles**.
-  ¿Una guitarra que no responde bien? **Controles → Informe de mandos** graba lo que envía y genera `mandos.txt`
+  **Guitarra CRKD (Gibson Les Paul)**: en **Controles → Preajustes** elige *Guitarra CRKD* (palanca e inclinación).
+  ¿Otra guitarra que no responde bien? **Controles → Informe de mandos** graba lo que envía y genera `mandos.txt`
   para poder configurarla.
 - **Imagen**: suavizado de bordes FXAA, filtrado anisotrópico de texturas y nitidez CAS (pestaña **Imagen y audio**).
 - **Micrófono**: cualquier micrófono de Windows hace de micrófono USB de la consola (pestaña **Micrófono**).

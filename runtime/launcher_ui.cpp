@@ -1059,6 +1059,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             {
                 AppendMenuW(m, MF_STRING, 1, L"Mando de Xbox: clásico (A verde, B rojo, Y amarillo, X azul, LB naranja)");
                 AppendMenuW(m, MF_STRING, 2, L"Mando de Xbox: gatillos (LT, LB, RB, RT, A; palanca con el stick derecho)");
+                AppendMenuW(m, MF_STRING, 5, L"Guitarra CRKD (Les Paul) en PC: palanca LT, inclinación RT");
                 AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
             }
             AppendMenuW(m, MF_STRING, 3, L"Valores por defecto");
@@ -1070,10 +1071,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             // Valores de cada funcion de la guitarra en el orden de g_guitar (verde..inclinacion)
             static const char* kTriggers[kGuitarN] = { "LT", "LB", "RB", "RT", "A", "UP|LS_UP", "DOWN|LS_DOWN", "LEFT|LS_LEFT", "RIGHT|LS_RIGHT",
                                                        "START", "BACK|Y|X", "RS", "" };
+            // Guitarra CRKD Gibson Les Paul (informe de mandos de un usuario, 2026-11-01): llega como mando XInput (subtipo 1) con
+            // los trastes de la guitarra de 360 (A B Y X LB), rasgueo en la cruceta, palanca en LT (0-255) e inclinacion en RT (255).
+            // Su sensor de movimiento mueve los dos sticks al inclinarla: se quitan del rasgueo para que no rasguee sola.
+            static const char* kCrkd[kGuitarN] = { "A", "B", "Y", "X", "LB", "UP", "DOWN", "LEFT", "RIGHT", "START", "BACK|RB", "LT", "RT" };
             for (int i = 0; i < CurMapN(); i++)
             {
                 MapFn& f = CurMap()[i];
-                std::string v = cmd == 2 ? kTriggers[i] : f.def;
+                std::string v = cmd == 2 ? kTriggers[i] : cmd == 5 ? kCrkd[i] : f.def;
                 if (cmd == 4) f.ovr[g.mapPlayer - 1].clear();
                 else if (g.mapPlayer > 0) f.ovr[g.mapPlayer - 1] = v;
                 else f.val = v;

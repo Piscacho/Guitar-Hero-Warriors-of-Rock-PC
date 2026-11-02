@@ -894,8 +894,8 @@ static const GuitarMap& GetGuitarMap(int u = 0)
         // de 360 va en el eje Y del stick derecho. mando_inclinacion=<botones> (vacio = ninguno)
         const char* ti = PlayerEnv(u, "GH6_MANDO_INCLINACION"); m.tilt = ti && *ti ? ParseSources(ti) : 0;
         const char* mode = PlayerEnv(u, "GH6_MANDO_MODO"); m.padMode = mode && (!_stricmp(mode, "mando") || !_stricmp(mode, "pad"));
-        LOG("[input] jugador %d: mando como %s (verde %X rojo %X amarillo %X azul %X naranja %X rasgueo %X/%X estrella %X palanca %X)", u + 1,
-            m.padMode ? "mando normal" : "guitarra", m.src[0], m.src[1], m.src[2], m.src[3], m.src[4], m.src[5], m.src[6], m.src[10], m.whammy);
+        LOG("[input] jugador %d: mando como %s (verde %X rojo %X amarillo %X azul %X naranja %X rasgueo %X/%X estrella %X palanca %X inclinacion %X)", u + 1,
+            m.padMode ? "mando normal" : "guitarra", m.src[0], m.src[1], m.src[2], m.src[3], m.src[4], m.src[5], m.src[6], m.src[10], m.whammy, m.tilt);
         return m; }(); });
     return maps[u];
 }

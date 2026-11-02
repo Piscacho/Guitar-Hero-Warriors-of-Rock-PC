@@ -764,3 +764,16 @@ puntuación/estrella con bloques blancos.
   en mandos.txt y lo abre: para configurar guitarras/baterias que no tenemos. El estado muestra el subtipo.
 - "Restablecer" -> "Preajustes": mando de Xbox clasico (A/B/Y/X/LB, colores de los botones), mando de Xbox gatillos (LT/LB/RB/RT/A,
   palanca RS, estrella BACK|Y|X), valores por defecto y quitar los propios del jugador. Se aplican a todos o al jugador elegido.
+
+## v1.1.0 publicada (2026-11-01)
+- Commit 6dbe981 en main; release v1.1.0 con zip + sha256 (SHA-256 20471f9f...). Release v1.0.0 borrada a peticion del usuario
+  (la etiqueta git v1.0.0 se conserva).
+- Prueba real del actualizador: copia v1.0.0 (run\upd_real) -> "Nueva version v1.1.0 disponible" -> instalar -> en 4 s queda
+  v1.1.0 y el launcher se reabre ("Version instalada: v1.1.0"), sin .old.
+
+## Guitarra CRKD Gibson Les Paul (informe de mandos de un amigo del usuario)
+- Llega como mando XInput (tipo 1, subtipo 1, flags 0). Trastes A B Y X LB (verde, rojo, amarillo, azul, naranja), rasgueo en la
+  cruceta, palanca en LT (analogico 0-255), inclinacion en RT (255 al levantar). Su sensor de movimiento mueve LS y RS al
+  inclinarla/sacudirla (con la asignacion por defecto LS rasgueaba solo). Start/Back no aparecen en el informe.
+- Preajuste "Guitarra CRKD (Les Paul) en PC" en Controles > Preajustes: A B Y X LB, UP/DOWN/LEFT/RIGHT solo cruceta, START,
+  BACK|RB, palanca LT, inclinacion RT. Verificado en el log del juego (rasgueo 1/2, palanca 10000, inclinacion 20000).

@@ -1181,7 +1181,14 @@ GUEST_IMPL(XamInputGetState)
     uint8_t lt = 0, rt = 0;
     uint16_t buttons = CurrentButtons(u, &lt, &rt);
     static uint32_t packet[kPlayers] = {}; static uint16_t lastButtons[kPlayers] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
-    if (buttons != lastButtons[u]) { packet[u]++; lastButtons[u] = buttons; }
+    if (buttons != lastButtons[u])
+    {
+        // GH6_LATLOG=1: muestra de audio en la que el juego ve cada pulsacion (con GH6_WAVDUMP se mide la latencia del sonido)
+        static bool latLog = getenv("GH6_LATLOG") != nullptr;
+        uint16_t pressed = buttons & ~lastButtons[u];
+        if (latLog && pressed && lastButtons[u] != 0xFFFF) { extern uint64_t AudioSubmitted(); LOG("[lat] pulsacion 0x%04X en la muestra %llu", pressed, (unsigned long long)AudioSubmitted()); }
+        packet[u]++; lastButtons[u] = buttons;
+    }
     memset(g_base + p, 0, 0x10);
     Store32(p, packet[u]); Store16(p + 4, buttons); g_base[p + 6] = lt; g_base[p + 7] = rt;
     // Sticks (en la guitarra: palanca = stick derecho X, inclinacion = stick derecho Y). Con un mando normal convertido, la palanca
@@ -1246,6 +1253,7 @@ std::atomic<uint64_t> g_audioFrames{ 0 }, g_audioSubmits{ 0 };
 std::atomic<bool> g_audioThread{ false };
 }
 size_t AudioQueuedFrames();     // audio_wasapi.cpp
+uint64_t AudioUnderruns();
 bool AudioOutputActive();
 namespace
 {
@@ -1270,7 +1278,23 @@ void AudioPump()
             // Sesion 21: ritmo marcado por la tarjeta de sonido; se genera mientras la cola tenga menos de ~50 ms
             // Sesion 24 (retraso): margen GH6_AUDIOMS (por defecto 40 ms). Antes 120 ms fijos (sesion 23: con 50 ms habia huecos,
             // cuando el juego iba a ~30 fps con el hilo de la GPU saturado).
-            static const size_t queueTarget = 48 * size_t(std::clamp(getenv("GH6_AUDIOMS") ? atoi(getenv("GH6_AUDIOMS")) : 40, 10, 250));
+            // Sesion 24: cola adaptativa. GH6_AUDIOMS = minimo (ms); si hay cortes (la cola se vacia: cargas, picos de CPU) sube 5 ms
+            // hasta GH6_AUDIOMAX (por defecto 80; como mucho 1 vez por segundo) y, tras 2 s sin cortes, baja 1 ms cada 0,3 s. GH6_AUDIOFIJO=1 = fija.
+            static const size_t minMs = (size_t)std::clamp(getenv("GH6_AUDIOMS") ? atoi(getenv("GH6_AUDIOMS")) : 20, 5, 250);
+            static const size_t maxMs = std::max(minMs, (size_t)std::clamp(getenv("GH6_AUDIOMAX") ? atoi(getenv("GH6_AUDIOMAX")) : 80, 5, 250));
+            static const bool fixedQ = getenv("GH6_AUDIOFIJO") != nullptr;
+            static size_t curMs = minMs; static uint64_t lastUnder = 0; static DWORD lastChange = GetTickCount();
+            if (!fixedQ)
+            {
+                uint64_t u = AudioUnderruns(); DWORD nowT = GetTickCount();
+                if (u != lastUnder)
+                {
+                    lastUnder = u;
+                    if (curMs < maxMs && nowT - lastChange > 1000) { curMs = std::min(maxMs, curMs + 5); lastChange = nowT; LOG("[audio] corte de audio: cola %zu ms", curMs); }
+                }
+                else if (curMs > minMs && nowT - lastChange > 2000) { curMs--; lastChange = nowT - 1700; }
+            }
+            const size_t queueTarget = 48 * curMs;
             while (AudioQueuedFrames() >= queueTarget) Sleep(1);
             QueryPerformanceCounter(&t0); n = 0;
         }

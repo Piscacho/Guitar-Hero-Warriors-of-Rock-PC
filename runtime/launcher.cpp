@@ -104,12 +104,15 @@ LauncherConfig LoadConfig()
             // latencia_audio: cola del juego + buffer de WASAPI (medido: ~38 / ~52 / ~90 ms sin contar la tarjeta)
             else if (k == "latencia_audio")
             {
-                const char* q = v == "baja" ? "25" : v == "segura" ? "80" : "40";
+                // sesion 24: cola adaptativa (minimo) + baja latencia de Windows; "segura" = cola fija de 80 ms sin baja latencia
+                const char* q = v == "baja" ? "12" : v == "segura" ? "80" : "20";
                 _putenv_s("GH6_AUDIOMS", q); _putenv_s("GH6_WASAPIMS", v == "segura" ? "30" : "20");
+                _putenv_s("GH6_AUDIOFIJO", v == "segura" ? "1" : ""); _putenv_s("GH6_NOLOWLAT", v == "segura" ? "1" : "");
             }
             else if (k == "anisotropico" && !v.empty()) _putenv_s("GH6_ANISO", v.c_str());
             else if (k == "nitidez" && !v.empty()) _putenv_s("GH6_NITIDEZ", v.c_str());
             else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : "fxaa");
+            else if (k == "mostrar_fps") _putenv_s("GH6_FPS", v == "1" ? "1" : "0");
             else if (k == "vsync") _putenv_s("GH6_VSYNC", v == "0" ? "0" : "1");
             else if (k == "escalado") _putenv_s("GH6_UPSCALE", v == "bilineal" ? "bilineal" : "");
             else if (k == "microfono_dispositivo") _putenv_s("GH6_MIC_DISPOSITIVO", v.c_str());

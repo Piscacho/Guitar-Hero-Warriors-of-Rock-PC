@@ -28,6 +28,8 @@ std::atomic<bool> g_started{ false }, g_running{ false };
 std::atomic<uint64_t> g_underruns{ 0 }, g_drops{ 0 };
 float g_peak = 0; uint64_t g_frames = 0;   // protegidos por g_mutex
 uint64_t g_dropouts = 0, g_dropoutsWin = 0;
+std::atomic<uint64_t> g_submitted{ 0 };
+std::atomic<uint32_t> g_lastPad{ 0 };   // relleno de WASAPI en la ultima vuelta (para el contador en pantalla)   // frames estereo entregados por el juego desde el arranque (medida de latencia)
 // Medida del retraso de salida (sesion 24): cola propia + relleno de WASAPI + latencia del motor de audio de Windows
 std::atomic<uint64_t> g_padSum{ 0 }, g_queueSum{ 0 }, g_samples{ 0 }; std::atomic<uint32_t> g_streamLatFrames{ 0 };
 
@@ -50,9 +52,34 @@ void RenderThread()
     wf.Format.wBitsPerSample = 32; wf.Format.nBlockAlign = 8; wf.Format.nAvgBytesPerSec = kRate * 8; wf.Format.cbSize = 22;
     wf.Samples.wValidBitsPerSample = 32; wf.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT; wf.SubFormat = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
     HANDLE ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    HRESULT hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-        600000 /* 60 ms */, 0, &wf.Format, nullptr);
+    // Sesion 24: modo de baja latencia de Windows 10+ (IAudioClient3): periodo minimo del motor de audio (p. ej. 3 ms en vez de
+    // 10 ms) cuando el formato coincide con el del motor. Si el driver no lo admite se usa el modo compartido normal.
+    // GH6_NOLOWLAT=1 lo desactiva (lo pone la latencia "segura" del launcher).
+    UINT32 lowPeriod = 0;
+    if (!getenv("GH6_NOLOWLAT"))
+    {
+        IAudioClient3* c3 = nullptr;
+        if (SUCCEEDED(client->QueryInterface(__uuidof(IAudioClient3), (void**)&c3)))
+        {
+            UINT32 def = 0, fund = 0, mn = 0, mx = 0;
+            HRESULT h3 = c3->GetSharedModeEnginePeriod(&wf.Format, &def, &fund, &mn, &mx);
+            if (SUCCEEDED(h3) && mn && mn < def) h3 = c3->InitializeSharedAudioStream(AUDCLNT_STREAMFLAGS_EVENTCALLBACK, mn, &wf.Format, nullptr);
+            else if (SUCCEEDED(h3)) h3 = E_NOTIMPL;   // el driver no ofrece periodos menores que el normal
+            if (SUCCEEDED(h3)) lowPeriod = mn;
+            LOG("[wasapi] baja latencia: %s (periodos del motor: normal %u, minimo %u frames)", lowPeriod ? "activa" : "no disponible", def, mn);
+            c3->Release();
+            if (!lowPeriod)
+            {   // un Initialize fallido puede dejar el cliente inutilizable: se pide uno nuevo
+                client->Release(); client = nullptr;
+                if (FAILED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client))) { LOG("[wasapi] no se pudo reabrir el dispositivo"); return; }
+            }
+        }
+    }
+    HRESULT hr = S_OK;
+    if (!lowPeriod)
+        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            600000 /* 60 ms */, 0, &wf.Format, nullptr);
     if (FAILED(hr)) { LOG("[wasapi] Initialize fallo (0x%08lX)", (unsigned long)hr); return; }
     client->SetEventHandle(ev);
     client->GetService(__uuidof(IAudioRenderClient), (void**)&render);
@@ -61,8 +88,10 @@ void RenderThread()
     // de WASAPI; antes se llenaba entero (60 ms) y sumaba ese retraso a cada sonido.
     REFERENCE_TIME defPeriod = 100000, minPeriod = 0; client->GetDevicePeriod(&defPeriod, &minPeriod);
     int wasapiMs = getenv("GH6_WASAPIMS") ? atoi(getenv("GH6_WASAPIMS")) : 20;
-    UINT32 periodFrames = (UINT32)(defPeriod * kRate / 10000000);
-    UINT32 targetPad = std::min<UINT32>(bufFrames, std::max<UINT32>((UINT32)(kRate * std::max(wasapiMs, 1) / 1000), 2 * periodFrames));
+    UINT32 periodFrames = lowPeriod ? lowPeriod : (UINT32)(defPeriod * kRate / 10000000);
+    // con baja latencia basta con 2 periodos (unos 6 ms) en el buffer de WASAPI
+    UINT32 targetPad = lowPeriod ? std::min<UINT32>(bufFrames, std::max<UINT32>(2 * lowPeriod, kRate * 4 / 1000))
+                                 : std::min<UINT32>(bufFrames, std::max<UINT32>((UINT32)(kRate * std::max(wasapiMs, 1) / 1000), 2 * periodFrames));
     REFERENCE_TIME lat = 0; client->GetStreamLatency(&lat); g_streamLatFrames = (uint32_t)(lat * kRate / 10000000);
     client->Start();
     g_running = true;
@@ -72,7 +101,7 @@ void RenderThread()
     {
         WaitForSingleObject(ev, 100);
         UINT32 pad = 0; if (FAILED(client->GetCurrentPadding(&pad))) continue;
-        { size_t q; { std::lock_guard l(g_mutex); q = g_count; } g_padSum += pad; g_queueSum += q; g_samples++; }
+        { size_t q; { std::lock_guard l(g_mutex); q = g_count; } g_padSum += pad; g_queueSum += q; g_samples++; g_lastPad = pad; }
         UINT32 want = targetPad > pad ? targetPad - pad : 0;
         if (!want) continue;
         BYTE* data = nullptr; if (FAILED(render->GetBuffer(want, &data))) continue;
@@ -111,6 +140,7 @@ void AudioSubmitXenonFrame(const uint8_t* src)
         *(uint32_t*)(hdr + 24) = kRate; *(uint32_t*)(hdr + 28) = kRate * 8; *(uint16_t*)(hdr + 32) = 8; *(uint16_t*)(hdr + 34) = 32;
         memcpy(hdr + 36, "data", 4); fwrite(hdr, 1, 44, f); return f; }();
     static uint64_t wavFrames = 0;
+    g_submitted += 256;
     for (int i = 0; i < 256; i++)
     {
         float c = ch(2, i) * 0.7071f;
@@ -143,6 +173,14 @@ void AudioSubmitXenonFrame(const uint8_t* src)
         if (n) LOG("[wasapi] retraso de salida ~%.0f ms (cola %.0f + WASAPI %.0f + Windows %.0f)", (qs + ps) / (double)n / 48.0 + g_streamLatFrames / 48.0,
                    qs / (double)n / 48.0, ps / (double)n / 48.0, g_streamLatFrames / 48.0);
     }
+}
+uint64_t AudioSubmitted() { return g_submitted.load(); }
+// Retraso de salida aproximado ahora mismo (cola propia + buffer de WASAPI + latencia del motor), en ms; 0 si no hay audio
+float AudioLatencyNowMs()
+{
+    if (!g_running) return 0;
+    size_t q; { std::lock_guard l(g_mutex); q = g_count; }
+    return (q + g_lastPad.load() + g_streamLatFrames.load()) / 48.0f;
 }
 size_t AudioQueuedFrames() { std::lock_guard l(g_mutex); return g_count; }
 bool AudioOutputActive() { return g_running.load(); }

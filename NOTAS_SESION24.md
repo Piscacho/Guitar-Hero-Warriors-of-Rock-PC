@@ -777,3 +777,59 @@ puntuación/estrella con bloques blancos.
   inclinarla/sacudirla (con la asignacion por defecto LS rasgueaba solo). Start/Back no aparecen en el informe.
 - Preajuste "Guitarra CRKD (Les Paul) en PC" en Controles > Preajustes: A B Y X LB, UP/DOWN/LEFT/RIGHT solo cruceta, START,
   BACK|RB, palanca LT, inclinacion RT. Verificado en el log del juego (rasgueo 1/2, palanca 10000, inclinacion 20000).
+
+## v1.1.1 publicada (2026-11-01)
+- Commit fc7c464; release v1.1.1 (zip SHA-256 413c2e6c...). Release v1.1.0 borrada a peticion del usuario (etiquetas v1.0.0 y
+  v1.1.0 se conservan). Actualizacion real v1.1.0 -> v1.1.1 comprobada con run\upd_real.
+
+## Diagnostico de "canciones atrasadas / notas que dejan de sonar" (partida del usuario, 2026-11-01)
+- gh6.log (dist): 2 canciones (again, bleeditout) en z_riothouse. 60 fps estables; WASAPI 0 huecos y 0 descartes, retraso ~52 ms;
+  frames de audio pedidos == enviados; pistas de cancion (contextos XMA 11-19) a 240640 muestras/5 s (tiempo real), 0 sin
+  entrada (los "sin entrada" son efectos cortos que terminan). latencia_audio=normal (igual que antes de la opcion).
+- Tirones dentro de cancion: solo al quitar la pausa (carga de song_unpause.pak, 283 ms) y cargas del final. Sin tirones al tocar.
+- Conclusion probable: desfase audio/video sin calibrar (tocar siguiendo la musica = tocar tarde -> fallo -> el juego silencia la
+  guitarra). Recomendado Options > Calibrate Lag. Pendiente de confirmar si el atraso empezo tras la pausa (posible fallo aparte).
+
+## Latencia del sonido al tocar (el usuario: "el audio suena mucho despues de tocar la nota")
+- Medida interna (GH6_LATLOG=1 + GH6_WAVDUMP, scratchpad lat_analyze.py, scripts\lat_menu.txt): desde que el juego ve la pulsacion
+  hasta que el sonido aparece en lo que entrega: 101-140 ms (mediana 119) en sonidos de menu. El callback de audio del juego
+  (sub_8272E6F0) es un intercambio de 1 bloque (KeWaitForMultipleObjects + XAudioSubmitRenderDriverFrame + KeSetEvent): el retraso
+  viene de antes (FMOD llenando por adelantado las voces de XAudio + reaccion de la logica). Sin localizar la configuracion de FMOD.
+- Nuestra parte: cola adaptativa en AudioPump (GH6_AUDIOMS = minimo 20 ms; sube 5 ms por corte como mucho 1/s hasta GH6_AUDIOMAX=80,
+  baja 1 ms cada 0,3 s tras 2 s sin cortes; GH6_AUDIOFIJO=1 = fija) y modo IAudioClient3 de baja latencia si el driver lo admite
+  (GH6_NOLOWLAT=1 lo quita). Launcher: baja = minimo 12, normal = 20, segura = 80 fija sin baja latencia.
+- Resultado con la Behringer UMC202HD: baja latencia no disponible (periodo minimo = normal = 480 frames); retraso de salida
+  52 -> ~32 ms; cortes solo durante la carga de la cancion, 0 en cancion; 59-60 fps. Total estimado ~100-120 (juego) + 32 + driver.
+
+## Optimizacion (2026-11-01, "dale a todos hasta donde llegues")
+1. Retraso interno del sonido (~120 ms): FMOD Ex 4.2 (E:\nxcommon_gh6\fmod\src\fmodexsrc42, fmod_output_xenon.cpp) sobre la XAudio
+   enlazada en el juego (registro del cliente de render en sub_8272EAD0; callback sub_8272E6F0 = intercambio de 1 bloque). Funciones
+   de fmod_output_xenon: sub_82360350/82360EB8/823613F8/82361B98; Output::init crea "FMOD mixer thread" en sub_82322180
+   (flag de sondeo en +636). No se localizo el tamano de bloque/numero de buffers: pendiente.
+2. Cola de presentacion medida (GetFrameStatistics): 1,0-1,2 cuadros de media, Present bloquea 0,2 ms. GH6_FRAMELATENCY=2 -> 1,0 y
+   60 fps (gana ~2-3 ms); =1 -> 58-59,7 fps. Sin cambio por defecto (no hay retraso que recortar).
+3. Lecturas del ISO medidas ([fs] lecturas del ISO cada 5 s): milisegundos, sin esperas de turno; no causan tirones. Desglose de
+   tirones en una partida: 70 % CPU del juego, 28 % destileado de texturas, PSO/compilacion ~0. Texturas: umbral de reparto entre
+   hilos 16384 -> 4096 bloques y >= 64 filas (GH6_TEXMIN).
+4. Codigo PPC con /O2 (GH6_PPC_OPT en CMake; antes /O1 sobrescribia el /O2 de Release): en punkstage, tiempo de tirones "resto"
+   4508 ms (O1) -> 2752/2949 ms (O2), 35-40 % menos; imagen identica. Por defecto /O2 en CMakeLists. exe 34,3 MB.
+- Contador en pantalla (F3, launcher "Contador de FPS (F3)" -> mostrar_fps / GH6_FPS): textura de 640x40 dibujada con GDI (Consolas,
+  alfa premultiplicado, fondo translucido) sobre la imagen final, esquina superior izquierda, escala con el alto de la imagen.
+  Muestra FPS (verde >= 57, amarillo >= 45, rojo), tiempo medio y maximo por cuadro, retraso de salida del audio (cola + WASAPI +
+  motor) y "tiron" si hubo un cuadro > 40 ms en el ultimo medio segundo. No sale en las capturas DUMP/F12.
+- rc.exe se colgaba (2 veces, ~1 h) en la compilacion tras reconfigurar: los recursos se compilan ahora con llvm-rc a project\gh6.res
+  (tools\build_game.bat) y se enlazan como entrada de lld-link; gh6.rc sin #include (constantes de winver.h a mano).
+
+## Tirones de 50 ms a mitad de cancion (sesion del usuario 2026-11-01 23:23)
+- gh6.log: ~150 tirones de 50 ms seguidos (cuadros 16785-22640 y 26885+), fps 39-58, con "vaciados" 10-40 ms. Causa: un efecto de
+  color del juego actualiza cada cuadro una tabla 3D (32x32x16 en 17083000) dibujando 16 rebanadas y copiandolas a la textura 3D
+  (RB_COPY_DEST_INFO bit 3 = destino 3D, bits 4-6 = rebanada): ese caso solo iba por CPU (8 resolves por CPU/cuadro) y la textura 3D
+  esperaba a la GPU (FlushResolvesIfOverlap -> FlushAndWait). Reproducible con scripts\lut_test.txt en punkstage (segun la partida).
+- Arreglo: rebanadas 8888 sin MSAA por GPU a texturas 2D propias (g_slices3D, clave direccion fisica << 3 | rebanada) y la textura 3D
+  se compone en la GPU con CopyTextureRegion (z = 8 * (direccion - base) / G + rebanada, G = (alto32/16)*(pitch32/32)*16384 bytes;
+  verificado contra Tiled3DOffset: 0 discrepancias en 80000 posiciones). Vista con el orden de canales de un resolve (swapRB/endian).
+  La primera composicion exige todas las rebanadas; si la CPU reescribe la memoria (hash distinto) se vuelve a la subida normal.
+  GH6_3DRESOLVECPU=1 = como antes. Resultado: 0 resolves por CPU, vaciados 23 ms en toda la partida, 60 fps; colores correctos
+  (run\lut_compare.png).
+- Otros tirones de esa partida: cargas de inicio/fin de cancion (267-584 ms, CPU del juego) y un shader nuevo compilado una vez
+  (234 ms, queda en la cache).

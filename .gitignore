@@ -27,3 +27,4 @@ rea/
 *.zip
 *.old
 __pycache__/
+project/build_*/

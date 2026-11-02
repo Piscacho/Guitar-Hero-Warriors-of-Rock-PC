@@ -37,7 +37,7 @@ Recompilación estática para PC de **Guitar Hero: Warriors of Rock** (Xbox 360,
 
 ### Teclas
 
-F11 o Alt+Enter: pantalla completa · F12: captura · F6: cambia el instrumento del jugador del teclado.
+F11 o Alt+Enter: pantalla completa · F3: contador de FPS · F12: captura · F6: cambia el instrumento del jugador del teclado.
 Teclado: flechas, Enter = Start, 1-5 = trastes, Retroceso = poder estrella.
 
 ## Compilar desde el código

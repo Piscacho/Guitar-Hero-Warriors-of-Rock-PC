@@ -38,6 +38,7 @@ Copia tus paquetes de contenido descargable de Xbox 360 (archivos LIVE/PIRS/CON,
 
 Imagen
 En "Imagen y audio": suavizado de bordes (FXAA), filtrado de texturas (anisotropico 16x) y nitidez (CAS).
+Contador de FPS: F3 en el juego (o "Contador de FPS" en el launcher): FPS, tiempo por cuadro, retraso del audio y tirones.
 
 Sincronia
 Calibra una vez en el juego: Options -> Calibrate Lag -> Calibrate. En el launcher, "Latencia del audio"

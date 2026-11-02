@@ -25,12 +25,29 @@ std::vector<std::pair<std::string, std::string>> g_links; // enlace simbolico (m
 
 std::string Lower(std::string s) { for (auto& c : s) c = (char)tolower((unsigned char)c); return s; }
 
+// Sesion 24: estadisticas de lectura del ISO (cada ~5 s si hubo lecturas): para ver si los tirones de carga son de disco
+static void IsoStats(double ms, uint32_t len, double waitMs)
+{
+    static std::mutex m; static double sumMs = 0, maxMs = 0, sumWait = 0; static uint64_t bytes = 0; static uint32_t n = 0; static DWORD last = GetTickCount();
+    std::lock_guard l(m);
+    sumMs += ms; sumWait += waitMs; bytes += len; n++; if (ms > maxMs) maxMs = ms;
+    if (GetTickCount() - last >= 5000)
+    {
+        LOG("[fs] lecturas del ISO: %u (%.1f MB) en %.0f ms, la mas lenta %.1f ms, esperando turno %.0f ms", n, bytes / 1048576.0, sumMs, maxMs, sumWait);
+        sumMs = maxMs = sumWait = 0; bytes = 0; n = 0; last = GetTickCount();
+    }
+}
 bool IsoRead(uint64_t off, void* dst, uint32_t len)
 {
+    LARGE_INTEGER f, t0, t1, t2; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0);
     std::lock_guard lock(g_isoMutex);
+    QueryPerformanceCounter(&t1);
     OVERLAPPED ov{}; ov.Offset = (DWORD)off; ov.OffsetHigh = (DWORD)(off >> 32);
     DWORD got = 0;
-    return ReadFile(g_isoFile, dst, len, &got, &ov) && got == len;
+    bool ok = ReadFile(g_isoFile, dst, len, &got, &ov) && got == len;
+    QueryPerformanceCounter(&t2);
+    IsoStats((t2.QuadPart - t1.QuadPart) * 1000.0 / f.QuadPart, len, (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart);
+    return ok;
 }
 
 void IsoWalk(uint32_t sector, uint32_t size, const std::string& prefix)

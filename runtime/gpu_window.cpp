@@ -10,6 +10,7 @@
 #include <string>
 #include <atomic>
 bool D3D12Present(HWND hwnd, const uint32_t* pixels, uint32_t w, uint32_t h);
+extern std::atomic<bool> g_showStats;   // gpu_d3d12.cpp: contador de FPS (F3)
 bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readback, uint32_t& outW, uint32_t& outH);
 std::atomic<int> g_dumpRequest{ -1 };   // >= 0: guardar shot_<n>.bmp en el siguiente present
 std::atomic<int> g_dumpSeq{ 0 };        // > 0: volcar los siguientes frames seguidos como seq_<n>.bmp
@@ -110,6 +111,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         }
         if (w == VK_F11 || (m == WM_SYSKEYDOWN && w == VK_RETURN)) { ToggleFullscreen(h); return 0; }
+        if (w == VK_F3 && m == WM_KEYDOWN && !(l & (1 << 30))) { g_showStats = !g_showStats; return 0; }   // contador de FPS
         break;
     }
     return DefWindowProcW(h, m, w, l);

@@ -175,7 +175,7 @@ enum
     ID_TAB0 = 100, ID_PLAY = 200, ID_SAVE, ID_EXIT, ID_SHOWLAUNCHER, ID_SAVED,
     ID_ISO = 300, ID_ISO_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_DLCCOUNT, ID_SKIPINTRO, ID_SAVEINFO, ID_SAVEOPEN, ID_SAVERESET, ID_SAVERESTORE,
     ID_UPDINFO, ID_UPDCHECK, ID_UPDAUTO,
-    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT, ID_AA, ID_ANISO, ID_SHARP,
+    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT, ID_AA, ID_ANISO, ID_SHARP, ID_FPS,
     ID_INST0 = 500, ID_PAD0 = 510, ID_STATUS0 = 520, ID_KBD = 530, ID_PS, ID_PADMODE, ID_DIAG, ID_MAPSET, ID_MAPPLAYER, ID_ASSIGN, ID_ADD, ID_RESET, ID_MAPLIST, ID_TESTPLAYER, ID_TESTPANEL,
     ID_MIC_ON = 600, ID_MIC_DEV, ID_MIC_GAIN, ID_MIC_GAINLBL, ID_MIC_METER,
 };
@@ -668,6 +668,7 @@ void BuildUi()
     Combo(1, 400, 262, 260, ID_SHARP, { L"Desactivada", L"Suave", L"Media (recomendada)", L"Alta" },
           ni == "0" ? 0 : ni == "0.25" ? 1 : ni == "0.7" ? 3 : 2);
     Toggle(1, L"Sincronización vertical (VSync)", 204, 298, 420, ID_VSYNC, flag("vsync", true));
+    Toggle(1, L"Contador de FPS (F3)", 640, 298, 222, ID_FPS, flag("mostrar_fps", false));
     Toggle(1, L"Desenfoque de movimiento (como la consola)", 204, 328, 420, ID_MBLUR, flag("desenfoque_movimiento", true));
     Toggle(1, L"Grano de película (como la consola)", 204, 358, 420, ID_GRAIN, flag("grano_pelicula", false));
     std::string al = ini.Get("latencia_audio", "normal");
@@ -752,6 +753,7 @@ bool Collect(bool requireIso)
     ini.Set("ventana", kWinSizesIni[std::max(0, Sel(ID_WINSIZE))]);
     ini.Set("escalado", Sel(ID_SCALE) == 1 ? "bilineal" : "catmull-rom");
     ini.Set("vsync", Toggled(ID_VSYNC) ? "1" : "0");
+    ini.Set("mostrar_fps", Toggled(ID_FPS) ? "1" : "0");
     ini.Set("desenfoque_movimiento", Toggled(ID_MBLUR) ? "1" : "0");
     ini.Set("grano_pelicula", Toggled(ID_GRAIN) ? "1" : "0");
     ini.Set("suavizado", Sel(ID_AA) == 1 ? "no" : "fxaa");

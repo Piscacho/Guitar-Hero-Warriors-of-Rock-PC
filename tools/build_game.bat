@@ -6,5 +6,7 @@ call "%VSBT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 set LLVM=%ROOT%\toolchain\clang+llvm-23.1.4-x86_64-pc-windows-msvc\bin
 set PATH=%LLVM%;%VSBT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VSBT%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%
 cd /d "%ROOT%\project"
+rem Recursos (icono y version) con llvm-rc: rc.exe se colgaba dentro de la compilacion
+"%LLVM%\llvm-rc.exe" -no-preprocess -fo gh6.res gh6.rc || exit /b 1
 if not exist build\build.ninja cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang-cl -DCMAKE_LINKER=lld-link || exit /b 1
 cmake --build build %* -- -k 0

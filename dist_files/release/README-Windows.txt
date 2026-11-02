@@ -21,6 +21,9 @@ Controles
   reasignar botones (para todos o solo para un jugador) pulsando "Asignar..." y el boton del mando.
 - Los jugadores 2 a 4 entran como invitados: en el aviso de perfil elige "Continue without saving".
 - F6 cambia el instrumento del jugador del teclado. F11 o Alt+Enter: pantalla completa. F12: captura.
+- Preajustes del mando de Xbox en Controles -> Preajustes: clasico (A/B/Y/X/LB) o gatillos (LT/LB/RB/RT/A).
+- Guitarra de otra marca que no responde bien: Controles -> "Informe de mandos" genera mandos.txt con lo que
+  envia; con ese archivo se puede configurar.
 - Teclado: flechas, Enter = Start, Retroceso = poder estrella, 1-5 = trastes (Espacio = verde,
   Esc = rojo), Q/E = gatillos. En bateria: 5 = platillo naranja, K o B = bombo.
 
@@ -31,6 +34,9 @@ ganancia y medidor de nivel). Se asigna al primer jugador con instrumento Voz.
 DLC
 Copia tus paquetes de contenido descargable de Xbox 360 (archivos LIVE/PIRS/CON, por ejemplo
 41560883\00000002\<archivo>) en la carpeta dlc (puede tener subcarpetas). Se importan solos al arrancar.
+
+Imagen
+En "Imagen y audio": suavizado de bordes (FXAA), filtrado de texturas (anisotropico 16x) y nitidez (CAS).
 
 Sincronia
 Calibra una vez en el juego: Options -> Calibrate Lag -> Calibrate. En el launcher, "Latencia del audio"

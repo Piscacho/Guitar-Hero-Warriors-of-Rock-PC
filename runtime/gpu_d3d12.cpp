@@ -218,7 +218,95 @@ float4 ps_cubic(V i) : SV_Target
     c += t0.SampleLevel(s0, float2(tp3.x, tp3.y), 0).rgb * w3.x * w3.y;
     return float4(saturate(c), 1);
 }
+// Sesion 24: suavizado de bordes FXAA (algoritmo 3.11, calidad alta) sobre la imagen 1280x720 antes de escalarla.
+// Busca el borde a lo largo de la direccion dominante y mezcla con el texel vecino segun la posicion en el escalon.
+static const float kFxaaSubpix = 0.5;        // suavizado de detalles de 1 pixel (0.75 por defecto en FXAA: emborrona textos)
+static const float kFxaaEdge = 0.125;        // contraste minimo relativo para tratar un borde
+static const float kFxaaEdgeMin = 0.0625;    // contraste minimo absoluto (zonas oscuras)
+float FxL(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+float FxS(float2 p) { return FxL(t0.SampleLevel(s0, p, 0).rgb); }
+float4 ps_fxaa(V i) : SV_Target
+{
+    float2 ts; t0.GetDimensions(ts.x, ts.y); float2 rcp = 1.0 / ts;
+    float2 pos = (floor(i.uv * ts) + 0.5) * rcp;
+    float3 rgbM = t0.SampleLevel(s0, pos, 0).rgb; float lumaM = FxL(rgbM);
+    float lumaS = FxL(t0.SampleLevel(s0, pos, 0, int2(0, 1)).rgb), lumaN = FxL(t0.SampleLevel(s0, pos, 0, int2(0, -1)).rgb);
+    float lumaE = FxL(t0.SampleLevel(s0, pos, 0, int2(1, 0)).rgb), lumaW = FxL(t0.SampleLevel(s0, pos, 0, int2(-1, 0)).rgb);
+    float rangeMax = max(max(lumaN, lumaW), max(lumaE, max(lumaS, lumaM)));
+    float rangeMin = min(min(lumaN, lumaW), min(lumaE, min(lumaS, lumaM)));
+    float range = rangeMax - rangeMin;
+    if (range < max(kFxaaEdgeMin, rangeMax * kFxaaEdge)) return float4(rgbM, 1);
+    float lumaNW = FxL(t0.SampleLevel(s0, pos, 0, int2(-1, -1)).rgb), lumaSE = FxL(t0.SampleLevel(s0, pos, 0, int2(1, 1)).rgb);
+    float lumaNE = FxL(t0.SampleLevel(s0, pos, 0, int2(1, -1)).rgb), lumaSW = FxL(t0.SampleLevel(s0, pos, 0, int2(-1, 1)).rgb);
+    float lumaNS = lumaN + lumaS, lumaWE = lumaW + lumaE;
+    float edgeHorz = abs(-2.0 * lumaW + lumaNW + lumaSW) + abs(-2.0 * lumaM + lumaNS) * 2.0 + abs(-2.0 * lumaE + lumaNE + lumaSE);
+    float edgeVert = abs(-2.0 * lumaS + lumaSW + lumaSE) + abs(-2.0 * lumaM + lumaWE) * 2.0 + abs(-2.0 * lumaN + lumaNW + lumaNE);
+    bool horzSpan = edgeHorz >= edgeVert;
+    float subpixA = (lumaNS + lumaWE) * 2.0 + (lumaNW + lumaSW + lumaNE + lumaSE);
+    float lengthSign = horzSpan ? rcp.y : rcp.x;
+    if (!horzSpan) { lumaN = lumaW; lumaS = lumaE; }
+    float gradientN = lumaN - lumaM, gradientS = lumaS - lumaM;
+    bool pairN = abs(gradientN) >= abs(gradientS);
+    float gradient = max(abs(gradientN), abs(gradientS));
+    if (pairN) lengthSign = -lengthSign;
+    float subpixC = saturate(abs(subpixA * (1.0 / 12.0) - lumaM) / range);
+    float2 posB = pos, offNP = horzSpan ? float2(rcp.x, 0) : float2(0, rcp.y);
+    if (!horzSpan) posB.x += lengthSign * 0.5; else posB.y += lengthSign * 0.5;
+    float lumaNN = (pairN ? lumaN : lumaS) + lumaM;
+    float gradientScaled = gradient * 0.25;
+    bool lumaMLTZero = lumaM - lumaNN * 0.5 < 0.0;
+    float2 posN = posB - offNP, posP = posB + offNP;
+    float lumaEndN = FxS(posN) - lumaNN * 0.5, lumaEndP = FxS(posP) - lumaNN * 0.5;
+    bool doneN = abs(lumaEndN) >= gradientScaled, doneP = abs(lumaEndP) >= gradientScaled;
+    static const float kSteps[8] = { 1.5, 2.0, 2.0, 2.0, 2.0, 4.0, 8.0, 8.0 };
+    [unroll] for (int k = 0; k < 8; k++)
+    {
+        if (doneN && doneP) break;
+        if (!doneN) { posN -= offNP * kSteps[k]; lumaEndN = FxS(posN) - lumaNN * 0.5; doneN = abs(lumaEndN) >= gradientScaled; }
+        if (!doneP) { posP += offNP * kSteps[k]; lumaEndP = FxS(posP) - lumaNN * 0.5; doneP = abs(lumaEndP) >= gradientScaled; }
+    }
+    float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y;
+    float dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
+    bool directionN = dstN < dstP;
+    bool goodSpan = directionN ? ((lumaEndN < 0.0) != lumaMLTZero) : ((lumaEndP < 0.0) != lumaMLTZero);
+    float pixelOffset = goodSpan ? 0.5 - min(dstN, dstP) / (dstN + dstP) : 0.0;
+    float subpixF = (-2.0 * subpixC + 3.0) * subpixC * subpixC;
+    float off = max(pixelOffset, subpixF * subpixF * kFxaaSubpix);
+    if (!horzSpan) pos.x += off * lengthSign; else pos.y += off * lengthSign;
+    return float4(t0.SampleLevel(s0, pos, 0).rgb, 1);
+}
+// Sesion 24: nitidez adaptativa al contraste (algoritmo CAS de AMD FidelityFX, licencia MIT) a la misma resolucion.
+// Realza el detalle de las texturas sin crear halos: el refuerzo baja donde ya hay mucho contraste. CAS_SHARP: 0..1.
+#ifndef CAS_SHARP
+#define CAS_SHARP 0.4
+#endif
+float3 CasL(int2 p, int2 mx) { return t0.Load(int3(clamp(p, int2(0, 0), mx), 0)).rgb; }
+float4 ps_cas(V i) : SV_Target
+{
+    uint w, h; t0.GetDimensions(w, h); int2 mx = int2(w - 1, h - 1), p = int2(i.pos.xy);
+    float3 a = CasL(p + int2(-1, -1), mx), b = CasL(p + int2(0, -1), mx), c = CasL(p + int2(1, -1), mx);
+    float3 d = CasL(p + int2(-1, 0), mx), e = CasL(p, mx), f = CasL(p + int2(1, 0), mx);
+    float3 g = CasL(p + int2(-1, 1), mx), hh = CasL(p + int2(0, 1), mx), ii = CasL(p + int2(1, 1), mx);
+    float3 mn = min(min(min(d, e), min(f, b)), hh); mn += min(mn, min(min(a, c), min(g, ii)));
+    float3 mxc = max(max(max(d, e), max(f, b)), hh); mxc += max(mxc, max(max(a, c), max(g, ii)));
+    float3 amp = sqrt(saturate(min(mn, 2.0 - mxc) / max(mxc, 1e-5)));
+    float3 wgt = amp * (-1.0 / lerp(8.0, 5.0, CAS_SHARP));
+    float3 col = (b * wgt + d * wgt + f * wgt + hh * wgt + e) / (1.0 + 4.0 * wgt);
+    return float4(saturate(col), 1);
+}
 )";
+// Suavizado de bordes en la presentacion (sesion 24): GH6_SUAVIZADO=fxaa|no (lo pone el launcher; por defecto fxaa)
+int AaMode() { static int m = [] { const char* v = getenv("GH6_SUAVIZADO"); return (v && (!_stricmp(v, "no") || !_stricmp(v, "0"))) ? 0 : 1; }(); return m; }
+// Nitidez CAS (GH6_NITIDEZ=0..1, 0 = desactivada; por defecto 0.4) y filtrado anisotropico de texturas (GH6_ANISO=1/2/4/8/16)
+float CasSharp() { static float v = [] { const char* e = getenv("GH6_NITIDEZ"); float f = e ? (float)atof(e) : 0.4f; return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }(); return v; }
+UINT AnisoLevel() { static UINT v = [] { const char* e = getenv("GH6_ANISO"); int a = e ? atoi(e) : 16; return (UINT)(a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1); }(); return v; }
+ComPtr<ID3D12PipelineState> g_fxaaPso, g_casPso;
+// Texturas intermedias del posproceso (0 = tras FXAA, 1 = tras CAS), mismo tamano que la imagen resuelta; SRV fijos 20 y 21
+ComPtr<ID3D12Resource> g_ppTex[2];
+ComPtr<ID3D12DescriptorHeap> g_ppRtvHeap;
+D3D12_RESOURCE_STATES g_ppState[2] = { D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE };
+UINT g_ppW = 0, g_ppH = 0;
+constexpr UINT kPpSrvSlot = 20;
 // Tamano actual de la cadena de intercambio (sigue al de la ventana) y ventana de presentacion (sesion 24)
 UINT g_bbW = kRtW, g_bbH = kRtH;
 HWND g_presentHwnd = nullptr;
@@ -387,6 +475,7 @@ static HRESULT CreatePsoCached(D3D12_GRAPHICS_PIPELINE_STATE_DESC& pd, uint64_t 
 {
     if (!g_psoLib) return g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
     uint64_t h = Fnv64(&key, sizeof(key));
+    { UINT salt = AnisoLevel(); h = Fnv64(&salt, sizeof(salt), h); }   // la firma raiz cambia con el anisotropico
     h = Fnv64(pd.VS.pShaderBytecode, pd.VS.BytecodeLength, h); h = Fnv64(pd.PS.pShaderBytecode, pd.PS.BytecodeLength, h);
     if (pd.GS.pShaderBytecode) h = Fnv64(pd.GS.pShaderBytecode, pd.GS.BytecodeLength, h);
     wchar_t name[24]; swprintf(name, 24, L"%016llX", (unsigned long long)h);
@@ -656,6 +745,10 @@ bool Init(HWND hwnd)
     D3D12_STATIC_SAMPLER_DESC ds[2] = { samp, samp };
     ds[0].AddressU = ds[0].AddressV = ds[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     ds[1] = ds[0]; ds[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT; ds[1].ShaderRegister = 1;
+    // Sesion 24: filtrado anisotropico (las texturas inclinadas -mastil, suelo- se ven nitidas a distancia). Con SampleGrad usa
+    // los gradientes reales; en pasadas a pantalla completa (gradientes iguales) da lo mismo que el trilineal.
+    if (AnisoLevel() > 1) { ds[0].Filter = D3D12_FILTER_ANISOTROPIC; ds[0].MaxAnisotropy = AnisoLevel(); }
+    LOG("[d3d12] filtrado de texturas: %s (x%u)", AnisoLevel() > 1 ? "anisotropico" : "trilineal", AnisoLevel());
     g_drawRootSig = MakeRootSig({ 4, dp, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
     if (!g_blitRootSig || !g_drawRootSig) { g_failed = true; return false; }
 
@@ -673,6 +766,19 @@ bool Init(HWND hwnd)
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM; pd.SampleDesc.Count = 1;
     if (!Check(g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_blitPso)), "CreateGraphicsPipelineState")) return false;
+    if (AaMode())
+    {
+        auto fps = Compile(kBlitHlsl, "ps_fxaa", "ps_5_0", "fxaa");
+        if (fps) { pd.PS = { fps->GetBufferPointer(), fps->GetBufferSize() }; g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_fxaaPso)); }
+        LOG("[d3d12] suavizado de bordes: %s", g_fxaaPso ? "FXAA" : "no disponible (fallo al compilar)");
+    }
+    if (CasSharp() > 0.0f)
+    {
+        char def[64]; snprintf(def, sizeof(def), "#define CAS_SHARP %.3f\n", CasSharp());
+        auto cps = Compile(std::string(def) + kBlitHlsl, "ps_cas", "ps_5_0", "cas");
+        if (cps) { pd.PS = { cps->GetBufferPointer(), cps->GetBufferSize() }; g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_casPso)); }
+        LOG("[d3d12] nitidez CAS %.2f: %s", CasSharp(), g_casPso ? "activa" : "no disponible (fallo al compilar)");
+    }
     // Copia de profundidad por GPU (sesion 21): lee el plano de profundidad y escribe R32_FLOAT + RGBA8 con los bits 24_8 empaquetados
     {
         D3D12_DESCRIPTOR_RANGE rd{ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0 };
@@ -3230,6 +3336,46 @@ static void DumpEdram(UINT64 frame)
 // Presenta directamente la textura resuelta por GPU del frontbuffer (sesion 21). Devuelve false si no hay (se usa la memoria).
 // readback != nullptr: ademas copia la imagen a la CPU (BGRA, como ReadFrontbuffer) para las capturas.
 bool D3D12Present(HWND hwnd, const uint32_t* pixels, uint32_t w, uint32_t h);
+// Texturas intermedias del posproceso (mismo tamano que la imagen resuelta), con RTV propio y SRV fijo (kPpSrvSlot + i)
+bool EnsurePpTex(UINT w, UINT h)
+{
+    if (g_ppTex[0] && g_ppW == w && g_ppH == h) return true;
+    UINT inc = g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    if (!g_ppRtvHeap) { D3D12_DESCRIPTOR_HEAP_DESC rh{}; rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rh.NumDescriptors = 2; if (FAILED(g_dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&g_ppRtvHeap)))) return false; }
+    if (g_ppTex[0]) { FlushAndWait(); g_ppTex[0].Reset(); g_ppTex[1].Reset(); }   // cambio de tamano: esperar a que la GPU deje las anteriores
+    D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    for (int i = 0; i < 2; i++)
+    {
+        if (FAILED(g_dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&g_ppTex[i])))) return false;
+        g_ppState[i] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        auto rtv = g_ppRtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr += i * inc;
+        g_dev->CreateRenderTargetView(g_ppTex[i].Get(), nullptr, rtv);
+        g_dev->CreateShaderResourceView(g_ppTex[i].Get(), nullptr, SrvCpu(kPpSrvSlot + i));
+    }
+    g_ppW = w; g_ppH = h;
+    LOG("[d3d12] texturas de posproceso %ux%u", w, h);
+    return true;
+}
+// Una pasada de posproceso: lee el SRV srcSlot y escribe en g_ppTex[idx]
+void PostPass(ID3D12PipelineState* pso, UINT srcSlot, int idx)
+{
+    if (g_ppState[idx] != D3D12_RESOURCE_STATE_RENDER_TARGET) { auto b = Transition(g_ppTex[idx].Get(), g_ppState[idx], D3D12_RESOURCE_STATE_RENDER_TARGET); g_list->ResourceBarrier(1, &b); }
+    auto rtv = g_ppRtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr += idx * g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    g_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp{ 0, 0, (float)g_ppW, (float)g_ppH, 0, 1 }; D3D12_RECT sr{ 0, 0, (LONG)g_ppW, (LONG)g_ppH };
+    g_list->RSSetViewports(1, &vp); g_list->RSSetScissorRects(1, &sr);
+    g_list->SetPipelineState(pso);
+    g_list->SetGraphicsRootSignature(g_blitRootSig.Get());
+    ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
+    g_list->SetDescriptorHeaps(1, heaps);
+    g_list->SetGraphicsRootDescriptorTable(0, SrvGpu(srcSlot));
+    g_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_list->DrawInstanced(3, 1, 0, 0);
+    auto b = Transition(g_ppTex[idx].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b);
+    g_ppState[idx] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+}
 bool D3D12FlushPendingResolves() { if (!g_dev || g_pendingResolvesEmpty()) return false; FlushPendingResolves(); return true; }
 
 bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readback, uint32_t& outW, uint32_t& outH)
@@ -3244,16 +3390,33 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
     OpenFrame();
     UINT fi = g_fi;
     outW = r.w; outH = r.h;
+    if (r.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) { auto b = Transition(r.res.Get(), r.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); r.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; }
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = 1;
+    sd.Shader4ComponentMapping = r.swapRB ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
+                                          : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
+    g_dev->CreateShaderResourceView(r.res.Get(), &sd, SrvCpu(3 + fi));
+    // Sesion 24: posproceso a la resolucion del juego antes del escalado: FXAA (suavizado de bordes) y CAS (nitidez)
+    bool doFxaa = AaMode() && g_fxaaPso, doCas = g_casPso != nullptr;
+    UINT curSlot = 3 + fi; int lastPp = -1;
+    if ((doFxaa || doCas) && EnsurePpTex(r.w, r.h))
+    {
+        if (doFxaa) { PostPass(g_fxaaPso.Get(), curSlot, 0); curSlot = kPpSrvSlot; lastPp = 0; }
+        if (doCas) { PostPass(g_casPso.Get(), curSlot, 1); curSlot = kPpSrvSlot + 1; lastPp = 1; }
+    }
+    bool aa = lastPp >= 0;
     if (readback)
     {
-        // Copia a la CPU para la captura
-        if (r.state != D3D12_RESOURCE_STATE_COPY_SOURCE) { auto b = Transition(r.res.Get(), r.state, D3D12_RESOURCE_STATE_COPY_SOURCE); g_list->ResourceBarrier(1, &b); r.state = D3D12_RESOURCE_STATE_COPY_SOURCE; }
+        // Copia a la CPU para la captura (con suavizado, la imagen suavizada: sus bytes ya estan en orden B G R)
+        ID3D12Resource* src = aa ? g_ppTex[lastPp].Get() : r.res.Get();
+        bool swapRB = aa ? true : r.swapRB;
+        { auto b = Transition(src, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE); g_list->ResourceBarrier(1, &b); }
         UINT rowPitch = (r.w * 4 + 255) & ~255u;
         D3D12_TEXTURE_COPY_LOCATION dst{ g_readback.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT }; dst.PlacedFootprint.Footprint = { DXGI_FORMAT_B8G8R8A8_UNORM, r.w, r.h, 1, rowPitch };
-        D3D12_TEXTURE_COPY_LOCATION sl{ r.res.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX }; sl.SubresourceIndex = 0;
+        D3D12_TEXTURE_COPY_LOCATION sl{ src, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX }; sl.SubresourceIndex = 0;
         if (g_readback)
         {
             CheckedCopy(&dst, 0, 0, 0, &sl, nullptr);
+            { auto b = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); }
             FlushAndWait();
             uint8_t* p = nullptr; g_readback->Map(0, nullptr, (void**)&p);
             if (p)
@@ -3264,18 +3427,14 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
                     {
                         const uint8_t* px = p + y * rowPitch + x * 4;   // B G R A del RT
                         // Igual que el camino por memoria: con swapRB la imagen sale con los colores del RT; sin el, con R y B cambiados
-                        uint32_t b = r.swapRB ? px[0] : px[2], g = px[1], rr = r.swapRB ? px[2] : px[0];
+                        uint32_t b = swapRB ? px[0] : px[2], g = px[1], rr = swapRB ? px[2] : px[0];
                         (*readback)[size_t(y) * r.w + x] = b | (g << 8) | (rr << 16) | 0xFF000000u;
                     }
                 g_readback->Unmap(0, nullptr);
             }
         }
+        else { auto b = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); }
     }
-    if (r.state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) { auto b = Transition(r.res.Get(), r.state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); r.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; }
-    D3D12_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; sd.Texture2D.MipLevels = 1;
-    sd.Shader4ComponentMapping = r.swapRB ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(0, 1, 2, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
-                                          : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
-    g_dev->CreateShaderResourceView(r.res.Get(), &sd, SrvCpu(3 + fi));
     auto toRt = Transition(g_backbuffers[fi].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
     g_list->ResourceBarrier(1, &toRt);
     D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = Rtv(fi);
@@ -3287,7 +3446,7 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
     g_list->SetGraphicsRootSignature(g_blitRootSig.Get());
     ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() };
     g_list->SetDescriptorHeaps(1, heaps);
-    g_list->SetGraphicsRootDescriptorTable(0, SrvGpu(3 + fi));
+    g_list->SetGraphicsRootDescriptorTable(0, SrvGpu(curSlot));
     g_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_list->DrawInstanced(3, 1, 0, 0);
     auto toPresent = Transition(g_backbuffers[fi].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);

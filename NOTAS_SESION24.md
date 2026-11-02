@@ -717,3 +717,50 @@ puntuación/estrella con bloques blancos.
   scratchpad upd_test.ps1 / upd_run.ps1).
 - Pestana Ayuda nueva (teclas, varios jugadores, sincronia, archivos). Contador de DLC ignora .txt/.md.
 - Para publicar: crear el repo Piscacho/Guitar-Hero-Warriors-of-Rock-PC, release con etiqueta v1.0.0 y subir el .zip como asset.
+
+## Publicado en GitHub (2026-11-01)
+- Repo publico https://github.com/Piscacho/Guitar-Hero-Warriors-of-Rock-PC: Recomp\ es ahora un repo git (rama main, primer
+  commit cb629d2, 152 archivos). XenonRecomp va como submodulo (hedge-dev/XenonRecomp @ ddd128b) + xenonrecomp_gh6.diff; el
+  submodulo sale "modificado" en git status por el parche local (normal).
+- .gitignore deja fuera todo lo del juego (xex/, ppc/, *.iso, *.xex, *.bin, *.cso, shaders_dis.txt, capturas) y lo pesado o
+  regenerable (toolchain/, ref/, dist/, run/, logs/, project/build/, release_staging/).
+- README.md de la raiz = guia de juego + "Compilar desde el codigo". tools\build_game.bat usa rutas relativas.
+- Release v1.0.0 publicada con el zip y su .sha256. El actualizador del launcher contra GitHub real responde
+  "Tienes la ultima version (v1.0.0)".
+- Para la siguiente version: subir AppVersion() (updater.cpp) y FILEVERSION (gh6.rc), tools\make_release.ps1, commit + push,
+  gh release create v<ver> <zip> <zip>.sha256.
+
+## Suavizado de bordes (FXAA) y estudio de logros / ultrapanoramico
+- gpu_d3d12.cpp: ps_fxaa (FXAA 3.11 de calidad: busqueda de 8 pasos, subpix 0.5, umbrales 0.125/0.0625) en kBlitHlsl. En la
+  presentacion directa (D3D12PresentResolved) la imagen resuelta pasa por FXAA a g_aaTex (mismo tamano, RTV propio, SRV fijo 20)
+  y despues al escalado Catmull-Rom. Las capturas (DUMP/F12) salen ya suavizadas. GH6_SUAVIZADO=no lo desactiva; launcher
+  "Suavizado de bordes" (suavizado=fxaa|no, por defecto fxaa). Coste: 60 fps estables en cancion (una medida dio 55-59: variacion).
+  Comparacion: run\aa_compare.png (borde del mastil escalonado sin FXAA, liso con FXAA).
+- SMAA: necesita las tablas AreaTex/SearchTex de iryoku/smaa (MIT); pendiente de que el usuario autorice descargarlas.
+- Logros: registro [xmsg] de XMsgStartIORequest/InProcessCall (60 lineas). En menus y cancion: app 0xFB (xgi) mensajes 0xB0006
+  (XUserSetContext) y 0xB0007 (XUserSetProperty); app 0xFA 0x7001A/0x7001B (XMP); app 0xFC 0x58004/0x58046. Los logros llegarian
+  por 0xFB / 0xB0008 (XUserWriteAchievements: {count, ptr -> {user, id}}). Definiciones (nombres, textos, iconos PNG) en el XDBF
+  de los recursos del default.xex del ISO del usuario.
+- 21:9 / 32:9: el juego solo contempla 4:3 y 16:9 y dibuja a 1280x720 en EDRAM; ultrapanoramico real exige FOV horizontal mayor,
+  superficies mas anchas y HUD anclado: depende de la resolucion interna escalable. Estimacion: dificil, varias sesiones.
+
+## Texturas: filtrado anisotropico y nitidez CAS
+- Los PS traducidos muestrean con SampleGrad (gradientes reales), asi que el muestreador lineal estatico de los draws (s0) pasa a
+  D3D12_FILTER_ANISOTROPIC con MaxAnisotropy = GH6_ANISO (1/2/4/8/16, por defecto 16). El nivel entra en el hash de la cache de
+  PSO (la firma raiz cambia): la primera partida tras cambiarlo vuelve a crear los PSO.
+- ps_cas (CAS de AMD FidelityFX, MIT) a la resolucion del juego despues del FXAA: cadena de posproceso g_ppTex[0/1] (SRV 20/21,
+  PostPass), GH6_NITIDEZ=0..1 (por defecto 0.4, 0 = sin pase). Capturas DUMP/F12 salen del ultimo pase.
+- Launcher: "Filtrado de texturas" (anisotropico=16|8|4|1) y "Nitidez" (nitidez=0|0.25|0.4|0.7). 60 fps en los tres modos.
+  Comparacion del tramo lejano del mastil: run\tx_highway.png.
+- Pendiente: las capturas DUMP no salen en la pantalla de calibracion (Options > Calibrate Lag), con o sin audio; en canciones
+  y menus si. Sin investigar.
+
+## Guitarras de terceros (CRKD) y mando de Xbox
+- Guitarra real: subtipos XInput 6, 7, 8 y 11 (bajo); al juego se le anuncia 6 (8 si es bateria). Segun resenas, la CRKD Les Paul
+  en PC (receptor 2.4 GHz o cable) se presenta como mando XInput; no se sabe si con subtipo de guitarra.
+- mando_inclinacion=<botones> (y jugadorN_mando_inclinacion): inclinacion = eje RY de la guitarra de 360 (32767 al levantar) para
+  guitarras que llegan como mando normal. En el launcher es la fila "Inclinacion (estrella)" (vacia por defecto).
+- Launcher, Controles: "Informe de mandos" graba 15 s (tipo/subtipo/flags de cada mando XInput y cada cambio de botones y ejes)
+  en mandos.txt y lo abre: para configurar guitarras/baterias que no tenemos. El estado muestra el subtipo.
+- "Restablecer" -> "Preajustes": mando de Xbox clasico (A/B/Y/X/LB, colores de los botones), mando de Xbox gatillos (LT/LB/RB/RT/A,
+  palanca RS, estrella BACK|Y|X), valores por defecto y quitar los propios del jugador. Se aplican a todos o al jugador elegido.

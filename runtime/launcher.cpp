@@ -107,6 +107,9 @@ LauncherConfig LoadConfig()
                 const char* q = v == "baja" ? "25" : v == "segura" ? "80" : "40";
                 _putenv_s("GH6_AUDIOMS", q); _putenv_s("GH6_WASAPIMS", v == "segura" ? "30" : "20");
             }
+            else if (k == "anisotropico" && !v.empty()) _putenv_s("GH6_ANISO", v.c_str());
+            else if (k == "nitidez" && !v.empty()) _putenv_s("GH6_NITIDEZ", v.c_str());
+            else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : "fxaa");
             else if (k == "vsync") _putenv_s("GH6_VSYNC", v == "0" ? "0" : "1");
             else if (k == "escalado") _putenv_s("GH6_UPSCALE", v == "bilineal" ? "bilineal" : "");
             else if (k == "microfono_dispositivo") _putenv_s("GH6_MIC_DISPOSITIVO", v.c_str());

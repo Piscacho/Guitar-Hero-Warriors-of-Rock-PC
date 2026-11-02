@@ -875,7 +875,7 @@ static const char* PlayerEnv(int u, const char* key)
     const char* v = getenv(k);
     return v && *v ? v : getenv(key);
 }
-struct GuitarMap { uint32_t src[11]; uint16_t dst[11]; uint32_t whammy; bool padMode; };
+struct GuitarMap { uint32_t src[11]; uint16_t dst[11]; uint32_t whammy, tilt; bool padMode; };
 static const GuitarMap& GetGuitarMap(int u = 0)
 {
     if (u < 0 || u >= kPlayers) u = 0;
@@ -890,6 +890,9 @@ static const GuitarMap& GetGuitarMap(int u = 0)
             { "GH6_MANDO_START", "START", 0x0010 }, { "GH6_MANDO_PODER_ESTRELLA", "BACK|RB", 0x0020 } };
         for (int i = 0; i < 11; i++) { const char* v = PlayerEnv(u, f[i].key); m.src[i] = ParseSources(v && *v ? v : f[i].def); m.dst[i] = f[i].dst; }
         const char* w = PlayerEnv(u, "GH6_MANDO_PALANCA"); m.whammy = ParseSources(w && *w ? w : "RT");
+        // Sesion 24: inclinacion (poder estrella al levantar el mastil) para guitarras que llegan como mando normal: en la guitarra
+        // de 360 va en el eje Y del stick derecho. mando_inclinacion=<botones> (vacio = ninguno)
+        const char* ti = PlayerEnv(u, "GH6_MANDO_INCLINACION"); m.tilt = ti && *ti ? ParseSources(ti) : 0;
         const char* mode = PlayerEnv(u, "GH6_MANDO_MODO"); m.padMode = mode && (!_stricmp(mode, "mando") || !_stricmp(mode, "pad"));
         LOG("[input] jugador %d: mando como %s (verde %X rojo %X amarillo %X azul %X naranja %X rasgueo %X/%X estrella %X palanca %X)", u + 1,
             m.padMode ? "mando normal" : "guitarra", m.src[0], m.src[1], m.src[2], m.src[3], m.src[4], m.src[5], m.src[6], m.src[10], m.whammy);
@@ -897,7 +900,7 @@ static const GuitarMap& GetGuitarMap(int u = 0)
     return maps[u];
 }
 // Estado crudo de un mando (botones XInput + gatillos + sticks) -> estado de guitarra
-static void PadToGuitar(int u, uint16_t b, uint8_t lt, uint8_t rt, const int16_t st[4], uint16_t& ob, int16_t& whammy)
+static void PadToGuitar(int u, uint16_t b, uint8_t lt, uint8_t rt, const int16_t st[4], uint16_t& ob, int16_t& whammy, int16_t& tiltY)
 {
     const GuitarMap& g = GetGuitarMap(u);
     uint32_t s = SourceBits(b, lt, rt, st);
@@ -909,8 +912,9 @@ static void PadToGuitar(int u, uint16_t b, uint8_t lt, uint8_t rt, const int16_t
     if (g.whammy & (0x0080 | SRC_RS_UP | SRC_RS_DOWN | SRC_RS_LEFT | SRC_RS_RIGHT))   // "RS" = stick derecho
         v = std::max(v, std::min(255, (std::max(abs(st[2]), abs(st[3])) >> 7)));
     whammy = (int16_t)std::clamp(-32768 + v * 257, -32768, 32767);
+    tiltY = (g.tilt && (s & g.tilt)) ? 32767 : 0;
 }
-static bool RealGuitar(const PadState& p) { return p.connected && p.subtype >= 6 && p.subtype <= 8; }
+static bool RealGuitar(const PadState& p) { return p.connected && ((p.subtype >= 6 && p.subtype <= 8) || p.subtype == 11); }
 // ---- instrumento de cada jugador (sesion 24) ----
 // 0 = guitarra (subtipo 6), 1 = bateria (subtipo 8), 2 = voz (mando normal, subtipo 1: el juego le asigna el microfono).
 // jugadorN_instrumento en gh6.ini (jugador 1: tambien mando_instrumento). F6 recorre los del jugador del teclado.
@@ -1069,9 +1073,10 @@ uint16_t CurrentButtons(int u, uint8_t* lt = nullptr, uint8_t* rt = nullptr)
             else
             {
                 uint16_t ob = 0; int16_t wh = -32768;
-                PadToGuitar(u, b, l, r, st, ob, wh);
+                int16_t tilt = 0;
+                PadToGuitar(u, b, l, r, st, ob, wh, tilt);
                 buttons |= ob;
-                if (!sticksSet) { g_sticks[u].v[0] = g_sticks[u].v[1] = g_sticks[u].v[3] = 0; g_sticks[u].v[2] = wh; sticksSet = true; }
+                if (!sticksSet) { g_sticks[u].v[0] = g_sticks[u].v[1] = 0; g_sticks[u].v[2] = wh; g_sticks[u].v[3] = tilt; sticksSet = true; }
             }
         };
         PadState pad = PollPad(XInputSlot(u));
@@ -1154,7 +1159,7 @@ GUEST_IMPL(XamInputGetCapabilities)
     static bool pad = getenv("GH6_PAD") != nullptr;
     PadState real = PollPad(XInputSlot(u));
     BYTE sub = DrumMode(u) ? 8 : 6;
-    if (RealGuitar(real)) sub = real.subtype;
+    if (RealGuitar(real)) sub = real.subtype == 8 ? 8 : 6;   // guitarra alternativa / bajo -> guitarra
     else if (pad || GetGuitarMap(u).padMode || VoiceMode(u)) sub = 1;
     g_base[p] = 1; g_base[p + 1] = sub;
     { static int lastSub[kPlayers] = { -1, -1, -1, -1 }; if (lastSub[u] != sub) { lastSub[u] = sub; LOG("[input] jugador %d: subtipo %u", u + 1, sub); } }
@@ -1359,16 +1364,24 @@ GUEST_IMPL(XamEnumerate)
 }
 
 // ---- mensajes XMsg ----
-GUEST_IMPL(XMsgInProcessCall) { ctx.r3.u64 = X_ERROR_SUCCESS; }
+// Sesion 24: registro de los mensajes (app 0xFB = xlivebase: logros, perfil, sesiones) para estudiar los logros
+static void LogXMsg(const char* fn, uint32_t app, uint32_t msg, uint32_t buf, uint32_t size)
+{
+    static int n = 0;
+    if (n++ < 60) LOG("[xmsg] %s(app 0x%X, mensaje 0x%08X, buffer %08X, %u bytes)", fn, app, msg, buf, size);
+}
+GUEST_IMPL(XMsgInProcessCall) { LogXMsg("XMsgInProcessCall", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32); ctx.r3.u64 = X_ERROR_SUCCESS; }
 // XMsgStartIORequestEx(app, message, overlapped, buffer, buffer_size, unk)
 GUEST_IMPL(XMsgStartIORequestEx)
 {
+    LogXMsg("XMsgStartIORequestEx", ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32);
     if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, X_ERROR_SUCCESS); ctx.r3.u64 = X_ERROR_IO_PENDING; }
     else ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 // XMsgStartIORequest(app, message, overlapped, buffer, buffer_size)
 GUEST_IMPL(XMsgStartIORequest)
 {
+    LogXMsg("XMsgStartIORequest", ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32);
     if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, X_ERROR_SUCCESS); ctx.r3.u64 = X_ERROR_IO_PENDING; }
     else ctx.r3.u64 = X_ERROR_SUCCESS;
 }

@@ -147,13 +147,13 @@ MapFn g_guitar[] = {
     { "mando_rasgueo_arriba", L"Rasgueo arriba", "UP|LS_UP" }, { "mando_rasgueo_abajo", L"Rasgueo abajo", "DOWN|LS_DOWN" },
     { "mando_izquierda", L"Izquierda (menús)", "LEFT|LS_LEFT" }, { "mando_derecha", L"Derecha (menús)", "RIGHT|LS_RIGHT" },
     { "mando_start", L"Start / pausa", "START" }, { "mando_poder_estrella", L"Poder estrella", "BACK|RB" },
-    { "mando_palanca", L"Palanca (whammy)", "RT" } };
+    { "mando_palanca", L"Palanca (whammy)", "RT" }, { "mando_inclinacion", L"Inclinación (estrella)", "" } };
 MapFn g_drum[] = {
     { "bateria_verde", L"Pad verde", "A" }, { "bateria_rojo", L"Pad rojo", "B" }, { "bateria_amarillo", L"Platillo amarillo", "Y" },
     { "bateria_azul", L"Pad azul", "X" }, { "bateria_naranja", L"Platillo naranja", "RB" }, { "bateria_bombo", L"Bombo", "LB|LT|RT" },
     { "bateria_arriba", L"Arriba (menús)", "UP|LS_UP" }, { "bateria_abajo", L"Abajo (menús)", "DOWN|LS_DOWN" },
     { "bateria_start", L"Start / pausa", "START" }, { "bateria_back", L"Atrás", "BACK" } };
-constexpr int kGuitarN = 12, kDrumN = 10;
+constexpr int kGuitarN = 13, kDrumN = 10;
 constexpr uint32_t kLT = 1u << 16, kRT = 1u << 17, kRSDirs = (1u << 22) | (1u << 23) | (1u << 24) | (1u << 25);
 const struct { const char* n; uint32_t m; } kNames[] = {
     { "A", 0x1000 }, { "B", 0x2000 }, { "X", 0x4000 }, { "Y", 0x8000 }, { "LB", 0x0100 }, { "RB", 0x0200 }, { "LT", kLT }, { "RT", kRT },
@@ -175,8 +175,8 @@ enum
     ID_TAB0 = 100, ID_PLAY = 200, ID_SAVE, ID_EXIT, ID_SHOWLAUNCHER, ID_SAVED,
     ID_ISO = 300, ID_ISO_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_DLCCOUNT, ID_SKIPINTRO, ID_SAVEINFO, ID_SAVEOPEN, ID_SAVERESET, ID_SAVERESTORE,
     ID_UPDINFO, ID_UPDCHECK, ID_UPDAUTO,
-    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT,
-    ID_INST0 = 500, ID_PAD0 = 510, ID_STATUS0 = 520, ID_KBD = 530, ID_PS, ID_PADMODE, ID_MAPSET, ID_MAPPLAYER, ID_ASSIGN, ID_ADD, ID_RESET, ID_MAPLIST, ID_TESTPLAYER, ID_TESTPANEL,
+    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT, ID_AA, ID_ANISO, ID_SHARP,
+    ID_INST0 = 500, ID_PAD0 = 510, ID_STATUS0 = 520, ID_KBD = 530, ID_PS, ID_PADMODE, ID_DIAG, ID_MAPSET, ID_MAPPLAYER, ID_ASSIGN, ID_ADD, ID_RESET, ID_MAPLIST, ID_TESTPLAYER, ID_TESTPANEL,
     ID_MIC_ON = 600, ID_MIC_DEV, ID_MIC_GAIN, ID_MIC_GAINLBL, ID_MIC_METER,
 };
 const wchar_t* kWinSizes[] = { L"1280 x 720", L"1600 x 900", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160" };
@@ -197,6 +197,7 @@ struct Ui
     MeterCapture meter; float meterShown = 0, meterHold = 0; DWORD holdT = 0; bool meterOn = false;
     XINPUT_STATE pads[4] = {}; bool padOk[4] = {}; BYTE padSub[4] = {}; DWORD padTry[4] = {};
     DWORD savedT = 0; int ticks = 0;
+    DWORD diagUntil = 0, diagStart = 0; FILE* diag = nullptr; std::string diagLast[4];
     bool result = false, done = false;
     UpdateInfo upd; bool updBusy = false, updAuto = false;
 } g;
@@ -294,9 +295,10 @@ void UpdateStatus()
         if (slot >= 0 && slot < 4)
         {
             if (!g.padOk[slot]) swprintf(t, 160, L"Mando %d sin conectar", slot + 1);
-            else if (g.padSub[slot] == 6 || g.padSub[slot] == 7) swprintf(t, 160, L"Mando %d: guitarra real", slot + 1);
+            else if (g.padSub[slot] == 6 || g.padSub[slot] == 7 || g.padSub[slot] == 11) swprintf(t, 160, L"Mando %d: guitarra real", slot + 1);
             else if (g.padSub[slot] == 8) swprintf(t, 160, L"Mando %d: batería real", slot + 1);
-            else swprintf(t, 160, L"Mando %d conectado", slot + 1);
+            else if (g.padSub[slot] == 1) swprintf(t, 160, L"Mando %d conectado (mando)", slot + 1);
+            else swprintf(t, 160, L"Mando %d conectado (tipo %u)", slot + 1, g.padSub[slot]);
         }
         else wcscpy(t, L"Sin mando XInput");
         if (Sel(ID_KBD) == p) wcscat(t, L" + teclado");
@@ -472,6 +474,7 @@ void DrawItem(DRAWITEMSTRUCT* d)
         Text(dc, f.label, l, kText, g.font);
         int mp = g.mapPlayer - 1; bool own = mp >= 0 && !f.ovr[mp].empty();
         std::wstring v = W(Eff(f, mp)); size_t pos; while ((pos = v.find(L'|')) != std::wstring::npos) v.replace(pos, 1, L"  /  ");
+        if (v.empty()) v = L"(ninguno)";
         if (mp >= 0 && !own) v += L"   (común)";
         bool cap = g.capturing && g.capItem == (int)d->itemID;
         if (cap) v = L"pulsa un botón...";
@@ -649,21 +652,30 @@ void BuildUi()
     // Graficos
     int ws = 0; std::string v = ini.Get("ventana", "1280x720");
     for (int i = 0; i < 5; i++) if (v == kWinSizesIni[i]) ws = i;
-    Toggle(1, L"Pantalla completa al arrancar", 204, 100, 420, ID_FULLSCREEN, flag("pantalla_completa", false));
-    Label(1, L"Tamaño de la ventana", 204, 146, 190, 22);
-    Combo(1, 400, 142, 200, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4] }, ws);
-    Label(1, L"Escalado de imagen", 204, 186, 190, 22);
-    Combo(1, 400, 182, 200, ID_SCALE, { L"Nítido (Catmull-Rom)", L"Suave (bilineal)" }, ini.Get("escalado") == "bilineal" ? 1 : 0);
-    Toggle(1, L"Sincronización vertical (VSync)", 204, 230, 420, ID_VSYNC, flag("vsync", true));
-    Toggle(1, L"Desenfoque de movimiento (como la consola)", 204, 268, 420, ID_MBLUR, flag("desenfoque_movimiento", true));
-    Toggle(1, L"Grano de película (como la consola)", 204, 306, 420, ID_GRAIN, flag("grano_pelicula", false));
-    Label(1, L"El juego dibuja a 1280 x 720 y se escala al tamaño de la ventana manteniendo 16:9.", 204, 342, 660, 22, 0, true);
+    Toggle(1, L"Pantalla completa al arrancar", 204, 94, 420, ID_FULLSCREEN, flag("pantalla_completa", false));
+    Label(1, L"Tamaño de la ventana", 204, 130, 190, 22);
+    Combo(1, 400, 126, 200, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4] }, ws);
+    Label(1, L"Escalado de imagen", 204, 164, 190, 22);
+    Combo(1, 400, 160, 200, ID_SCALE, { L"Nítido (Catmull-Rom)", L"Suave (bilineal)" }, ini.Get("escalado") == "bilineal" ? 1 : 0);
+    Label(1, L"Suavizado de bordes", 204, 198, 190, 22);
+    Combo(1, 400, 194, 260, ID_AA, { L"FXAA (quita los dientes de sierra)", L"Desactivado" }, ini.Get("suavizado", "fxaa") == "no" ? 1 : 0);
+    std::string an = ini.Get("anisotropico", "16");
+    Label(1, L"Filtrado de texturas", 204, 232, 190, 22);
+    Combo(1, 400, 228, 260, ID_ANISO, { L"Anisotrópico 16x (recomendado)", L"Anisotrópico 8x", L"Anisotrópico 4x", L"Trilineal (como la consola)" },
+          an == "8" ? 1 : an == "4" ? 2 : an == "1" ? 3 : 0);
+    std::string ni = ini.Get("nitidez", "0.4");
+    Label(1, L"Nitidez", 204, 266, 190, 22);
+    Combo(1, 400, 262, 260, ID_SHARP, { L"Desactivada", L"Suave", L"Media (recomendada)", L"Alta" },
+          ni == "0" ? 0 : ni == "0.25" ? 1 : ni == "0.7" ? 3 : 2);
+    Toggle(1, L"Sincronización vertical (VSync)", 204, 298, 420, ID_VSYNC, flag("vsync", true));
+    Toggle(1, L"Desenfoque de movimiento (como la consola)", 204, 328, 420, ID_MBLUR, flag("desenfoque_movimiento", true));
+    Toggle(1, L"Grano de película (como la consola)", 204, 358, 420, ID_GRAIN, flag("grano_pelicula", false));
     std::string al = ini.Get("latencia_audio", "normal");
-    Label(1, L"Latencia del audio", 204, 382, 190, 22, 0, false, g.fontBold);
-    Combo(1, 400, 378, 260, ID_AUDIOLAT, { L"Baja (~40 ms)", L"Normal (~55 ms)", L"Segura (~95 ms, PCs lentos)" }, al == "baja" ? 0 : al == "segura" ? 2 : 1);
-    Label(1, L"Baja puede dar algún chasquido durante las cargas (sin contar la tarjeta de sonido ni la tele).\n"
-             L"Para que notas y música coincidan, calibra una vez en el juego: Options > Calibrate Lag > Calibrate\n"
-             L"(primero el vídeo: toca cuando la nota pase por la línea; luego el audio: toca con los golpes).", 204, 414, 660, 70, 0, true);
+    Label(1, L"Latencia del audio", 204, 398, 190, 22, 0, false, g.fontBold);
+    Combo(1, 400, 394, 260, ID_AUDIOLAT, { L"Baja (~40 ms)", L"Normal (~55 ms)", L"Segura (~95 ms, PCs lentos)" }, al == "baja" ? 0 : al == "segura" ? 2 : 1);
+    Label(1, L"Baja puede dar algún chasquido en las cargas. Para que notas y música coincidan, calibra una vez\n"
+             L"en el juego: Options > Calibrate Lag > Calibrate (vídeo: toca cuando la nota pase por la línea;\n"
+             L"audio: toca con los golpes).", 204, 430, 660, 70, 0, true);
     // Controles
     Label(2, L"Jugador", 204, 96, 80, 22, 0, true); Label(2, L"Instrumento", 290, 96, 130, 22, 0, true);
     Label(2, L"Mando", 432, 96, 140, 22, 0, true); Label(2, L"Estado", 584, 96, 200, 22, 0, true);
@@ -688,12 +700,13 @@ void BuildUi()
     Label(2, L"Mando PlayStation", 432, 258, 140, 22);
     Combo(2, 584, 254, 132, ID_PS, players, atoi(ini.Get("mando_ps_jugador", "1").c_str()) - 1);
     Toggle(2, L"Mando normal (sin convertirlo en guitarra o batería)", 204, 288, 460, ID_PADMODE, ini.Get("mando_modo", "guitarra") == "mando");
+    Button(2, L"Informe de mandos", 690, 287, 172, 28, ID_DIAG);
     Label(2, L"Botones de", 204, 328, 90, 22, 0, false, g.fontBold);
     Combo(2, 290, 324, 132, ID_MAPSET, { L"Guitarra", L"Batería" }, 0);
     Combo(2, 432, 324, 150, ID_MAPPLAYER, { L"Todos los jugadores", L"Solo jugador 1", L"Solo jugador 2", L"Solo jugador 3", L"Solo jugador 4" }, 0);
     Button(2, L"Asignar...", 592, 323, 88, 28, ID_ASSIGN);
     Button(2, L"Añadir...", 686, 323, 80, 28, ID_ADD);
-    Button(2, L"Restablecer", 772, 323, 90, 28, ID_RESET);
+    Button(2, L"Preajustes", 772, 323, 90, 28, ID_RESET);
     HWND list = Make(2, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 204, 360, 330, 150, ID_MAPLIST);
     SetWindowTheme(list, L"DarkMode_Explorer", nullptr);
     Label(2, L"Probar", 548, 362, 60, 22, 0, true);
@@ -741,6 +754,9 @@ bool Collect(bool requireIso)
     ini.Set("vsync", Toggled(ID_VSYNC) ? "1" : "0");
     ini.Set("desenfoque_movimiento", Toggled(ID_MBLUR) ? "1" : "0");
     ini.Set("grano_pelicula", Toggled(ID_GRAIN) ? "1" : "0");
+    ini.Set("suavizado", Sel(ID_AA) == 1 ? "no" : "fxaa");
+    { static const char* an[] = { "16", "8", "4", "1" }; ini.Set("anisotropico", an[std::clamp(Sel(ID_ANISO), 0, 3)]); }
+    { static const char* ni[] = { "0", "0.25", "0.4", "0.7" }; ini.Set("nitidez", ni[std::clamp(Sel(ID_SHARP), 0, 3)]); }
     { static const char* lat[] = { "baja", "normal", "segura" }; ini.Set("latencia_audio", lat[std::clamp(Sel(ID_AUDIOLAT), 0, 2)]); }
     for (int p = 0; p < 4; p++)
     {
@@ -772,6 +788,51 @@ bool Collect(bool requireIso)
     return true;
 }
 
+// ---- informe de mandos (para configurar guitarras/baterias que no tenemos): tipo de cada mando y 15 s de pulsaciones ----
+void DiagStart()
+{
+    if (g.diag) return;
+    std::string path = ExeDir() + "\\mandos.txt";
+    g.diag = fopen(path.c_str(), "w");
+    if (!g.diag) return;
+    SYSTEMTIME st; GetLocalTime(&st);
+    fprintf(g.diag, "Informe de mandos - GH:WoR PC v%s - %04d-%02d-%02d %02d:%02d\n", AppVersion(), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+    fprintf(g.diag, "Subtipos XInput: 1 mando, 6 guitarra, 7 guitarra alternativa, 8 bateria, 11 bajo\n\n");
+    for (int i = 0; i < 4; i++)
+    {
+        XINPUT_CAPABILITIES c{}; XINPUT_STATE x{};
+        if (XInputGetState(i, &x) != ERROR_SUCCESS) { fprintf(g.diag, "Mando XInput %d: sin conectar\n", i + 1); continue; }
+        XInputGetCapabilities(i, 0, &c);
+        fprintf(g.diag, "Mando XInput %d: tipo %u, subtipo %u, flags 0x%04X, botones 0x%04X, gatillos %u/%u, sticks %d/%d/%d/%d\n", i + 1, c.Type, c.SubType, c.Flags,
+                c.Gamepad.wButtons, c.Gamepad.bLeftTrigger, c.Gamepad.bRightTrigger, c.Gamepad.sThumbLX, c.Gamepad.sThumbLY, c.Gamepad.sThumbRX, c.Gamepad.sThumbRY);
+    }
+    uint16_t pb; uint8_t pl, pr; int16_t ps[4];
+    fprintf(g.diag, "Mando PlayStation: %s\n\nPulsaciones (cada cambio):\n", PsPadGetState(pb, pl, pr, ps) ? "conectado" : "no");
+    for (auto& l : g.diagLast) l.clear();
+    g.diagStart = GetTickCount(); g.diagUntil = g.diagStart + 15000;
+}
+void DiagTick()
+{
+    if (!g.diag) return;
+    DWORD now = GetTickCount();
+    for (int i = 0; i < 4; i++)
+    {
+        if (!g.padOk[i]) continue;
+        auto& gp = g.pads[i].Gamepad;
+        char line[256];
+        snprintf(line, sizeof(line), "botones=%s LT=%u RT=%u LX=%d LY=%d RX=%d RY=%d", gp.wButtons ? BitsToNames(gp.wButtons).c_str() : "-", gp.bLeftTrigger, gp.bRightTrigger,
+                 gp.sThumbLX / 1024 * 1024, gp.sThumbLY / 1024 * 1024, gp.sThumbRX / 1024 * 1024, gp.sThumbRY / 1024 * 1024);   // redondeo: sin ruido
+        if (g.diagLast[i] != line) { g.diagLast[i] = line; fprintf(g.diag, "t=%5.2f s  mando %d: %s\n", (now - g.diagStart) / 1000.0, i + 1, line); }
+    }
+    wchar_t t[160]; swprintf(t, 160, L"Grabando: pulsa cada traste, rasguea, mueve la palanca e inclina la guitarra (%u s)", (g.diagUntil - now + 999) / 1000);
+    SetWindowTextW(Item(ID_SAVED), t); g.savedT = 0;
+    if (now >= g.diagUntil)
+    {
+        fclose(g.diag); g.diag = nullptr;
+        SetWindowTextW(Item(ID_SAVED), L"Informe guardado en mandos.txt"); g.savedT = GetTickCount();
+        ShellExecuteW(g.wnd, L"open", W(ExeDir() + "\\mandos.txt").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
 bool Collect(bool requireIso);
 // ---- partidas (carpeta de datos: gh6.ini datos=, por defecto userdata) ----
 namespace fsx = std::filesystem;
@@ -929,6 +990,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
         g.ticks++;
         PollPads();
+        DiagTick();
         if (g.tab == 2) { TickCapture(); InvalidateRect(Item(ID_TESTPANEL), nullptr, FALSE); if (g.ticks % 15 == 0) UpdateStatus(); }
         if (g.tab == 3)
         {
@@ -958,6 +1020,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_SAVE: if (Collect(false)) { g.ini.Save(ExeDir() + "\\gh6.ini"); SetWindowTextW(Item(ID_SAVED), L"Configuración guardada"); g.savedT = GetTickCount(); } return 0;
         case ID_EXIT: DestroyWindow(h); return 0;
         case ID_ISO_BROWSE: BrowseIso(); return 0;
+        case ID_DIAG:
+            if (MessageBoxW(h, L"Se grabarán 15 segundos de lo que pulses en los mandos conectados (guitarra, batería...).\n\n"
+                               L"Al aceptar: pulsa cada traste uno a uno, rasguea arriba y abajo, mueve la palanca, inclina la guitarra "
+                               L"y pulsa Start y Back. Al terminar se abre mandos.txt: envíalo para configurar ese mando.",
+                            L"Informe de mandos", MB_OKCANCEL | MB_ICONINFORMATION) == IDOK) DiagStart();
+            return 0;
         case ID_SAVEOPEN: { std::error_code ec; fsx::create_directories(DataDir(), ec); ShellExecuteW(h, L"open", DataDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL); } return 0;
         case ID_SAVERESET: ResetSave(); return 0;
         case ID_SAVERESTORE: RestoreSave(); return 0;
@@ -985,14 +1053,34 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_ADD: StartCapture(true); return 0;
         case ID_MAPLIST: if (code == LBN_DBLCLK) StartCapture(false); return 0;
         case ID_RESET:
-            if (MessageBoxW(h, g.mapPlayer > 0 ? L"¿Quitar los botones propios de este jugador (vuelve a usar los comunes)?"
-                                 : g.mapSet == 0 ? L"¿Restablecer los botones comunes de la guitarra?" : L"¿Restablecer los botones comunes de la batería?",
-                            L"GH:WoR", MB_YESNO | MB_ICONQUESTION) == IDYES)
+        {   // Preajustes (sesion 24): se aplican a todos los jugadores o solo al elegido en "Solo jugador N"
+            HMENU m = CreatePopupMenu();
+            if (g.mapSet == 0)
             {
-                for (int i = 0; i < CurMapN(); i++) { if (g.mapPlayer > 0) CurMap()[i].ovr[g.mapPlayer - 1].clear(); else CurMap()[i].val = CurMap()[i].def; }
-                g.capturing = false; InvalidateRect(Item(ID_MAPLIST), nullptr, TRUE);
+                AppendMenuW(m, MF_STRING, 1, L"Mando de Xbox: clásico (A verde, B rojo, Y amarillo, X azul, LB naranja)");
+                AppendMenuW(m, MF_STRING, 2, L"Mando de Xbox: gatillos (LT, LB, RB, RT, A; palanca con el stick derecho)");
+                AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
             }
+            AppendMenuW(m, MF_STRING, 3, L"Valores por defecto");
+            if (g.mapPlayer > 0) AppendMenuW(m, MF_STRING, 4, L"Quitar los botones propios de este jugador");
+            RECT br; GetWindowRect(Item(ID_RESET), &br);
+            int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_TOPALIGN, br.right, br.bottom, 0, h, nullptr);
+            DestroyMenu(m);
+            if (!cmd) return 0;
+            // Valores de cada funcion de la guitarra en el orden de g_guitar (verde..inclinacion)
+            static const char* kTriggers[kGuitarN] = { "LT", "LB", "RB", "RT", "A", "UP|LS_UP", "DOWN|LS_DOWN", "LEFT|LS_LEFT", "RIGHT|LS_RIGHT",
+                                                       "START", "BACK|Y|X", "RS", "" };
+            for (int i = 0; i < CurMapN(); i++)
+            {
+                MapFn& f = CurMap()[i];
+                std::string v = cmd == 2 ? kTriggers[i] : f.def;
+                if (cmd == 4) f.ovr[g.mapPlayer - 1].clear();
+                else if (g.mapPlayer > 0) f.ovr[g.mapPlayer - 1] = v;
+                else f.val = v;
+            }
+            g.capturing = false; InvalidateRect(Item(ID_MAPLIST), nullptr, TRUE); InvalidateRect(Item(ID_TESTPANEL), nullptr, FALSE);
             return 0;
+        }
         case ID_MIC_DEV: if (code == CBN_SELCHANGE) StartMeter(); return 0;
         case ID_KBD: case ID_PS: case ID_PAD0: case ID_PAD0 + 1: case ID_PAD0 + 2: case ID_PAD0 + 3: if (code == CBN_SELCHANGE) UpdateStatus(); return 0;
         }

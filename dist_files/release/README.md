@@ -15,9 +15,12 @@ Recompilación estática para PC de **Guitar Hero: Warriors of Rock** (Xbox 360,
    **Más información → Ejecutar de todas formas**.
 4. En el launcher, pestaña **Juego**, elige el ISO con **Examinar...** y pulsa **JUGAR**.
 
-- **Controles**: un mando de Xbox o de PlayStation se convierte en guitarra o batería (o mando normal para la voz).
-  Las guitarras y baterías de Xbox 360 para PC se detectan solas. Hasta 4 jugadores, cada uno con su instrumento,
-  y botones reasignables (comunes o por jugador) en **Controles**.
+- **Controles**: un mando de Xbox o de PlayStation se convierte en guitarra o batería (o mando normal para la voz),
+  con preajustes para el mando de Xbox (clásico o con gatillos). Las guitarras y baterías XInput para PC se detectan
+  solas. Hasta 4 jugadores, cada uno con su instrumento, y botones reasignables (comunes o por jugador) en **Controles**.
+  ¿Una guitarra que no responde bien? **Controles → Informe de mandos** graba lo que envía y genera `mandos.txt`
+  para poder configurarla.
+- **Imagen**: suavizado de bordes FXAA, filtrado anisotrópico de texturas y nitidez CAS (pestaña **Imagen y audio**).
 - **Micrófono**: cualquier micrófono de Windows hace de micrófono USB de la consola (pestaña **Micrófono**).
 - **DLC**: copia tus paquetes de Xbox 360 (archivos LIVE/PIRS/CON) en `dlc\`; se importan solos al arrancar.
 - **Sincronía**: calibra una vez en el juego, en **Options → Calibrate Lag → Calibrate**.

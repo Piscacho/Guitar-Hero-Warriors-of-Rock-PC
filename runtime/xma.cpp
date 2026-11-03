@@ -27,7 +27,9 @@ std::vector<bool> g_used(kContexts, false);
 std::vector<bool> g_everKicked(kContexts, false);
 bool g_xmaLog = getenv("GH6_XMALOG") != nullptr;
 std::atomic<uint64_t> g_kicks{ 0 }, g_packets{ 0 }, g_samples{ 0 }, g_errors{ 0 }, g_starves{ 0 };
-uint32_t g_ctxWritten[320], g_ctxStarves[320], g_ctxKicks[320];   // por contexto, desde el ultimo informe (sesion 24)
+uint32_t g_ctxWritten[320], g_ctxStarves[320], g_ctxKicks[320];
+// Sesion 25 (desfase): muestras escritas por contexto desde su primera escritura y la hora de esa escritura (ritmo real de consumo)
+uint64_t g_ctxTotal[320]; LARGE_INTEGER g_ctxFirst[320]; uint32_t g_ctxRate[320];   // por contexto, desde el ultimo informe (sesion 24)
 
 inline volatile LONG* RegPtr(uint32_t r) { return (volatile LONG*)(g_base + kMmio + r * 4); }
 inline uint32_t Ctx(uint32_t i) { return g_arrayGuest + i * kContextSize; }
@@ -186,6 +188,8 @@ void WorkContext(uint32_t i)
     {
         if (!EnsureSamples(c, d, subSamples)) { g_starves++; g_ctxStarves[i]++; break; }   // hueco en la salida pero sin entrada (sesion 23)
         g_ctxWritten[i] += 128;
+        if (!g_ctxTotal[i]) { QueryPerformanceCounter(&g_ctxFirst[i]); g_ctxRate[i] = rates[Bits(d1, 27, 2)]; }
+        g_ctxTotal[i] += 128;
         for (uint32_t k = 0; k < subSamples; k++)
         {
             *(uint16_t*)(g_base + out + wr) = __builtin_bswap16((uint16_t)d.pending[k]);
@@ -231,7 +235,7 @@ void XmaThread()
             {
                 uint32_t i = g * 32 + b;
                 if (i >= kContexts) break;
-                if (clr & (1u << b)) { std::lock_guard l(g_decMutex); g_dec[i].Reset(); g_dec[i].enabled = false; }
+                if (clr & (1u << b)) { std::lock_guard l(g_decMutex); g_dec[i].Reset(); g_dec[i].enabled = false; g_ctxTotal[i] = 0; }
                 if (lock & (1u << b)) g_dec[i].enabled = false;
                 if (kick & (1u << b))
                 {
@@ -291,6 +295,25 @@ void XmaThread()
                     line += b; g_ctxWritten[i] = g_ctxStarves[i] = g_ctxKicks[i] = 0;
                 }
                 LOG("[xma] por contexto (escritas/sin entrada/kicks):%s", line.c_str());
+                {   // ritmo de consumo desde la primera escritura (solo contextos que siguen activos)
+                    LARGE_INTEGER now, f; QueryPerformanceCounter(&now); QueryPerformanceFrequency(&f);
+                    std::string rl;
+                    for (uint32_t i = 0; i < kContexts; i++)
+                    {
+                        if (!g_used[i] || !g_ctxTotal[i]) continue;
+                        double el = double(now.QuadPart - g_ctxFirst[i].QuadPart) / f.QuadPart;
+                        if (el < 20) continue;
+                        snprintf(b, sizeof(b), " %u:%.1fHz/%u(%.0fs)", i, g_ctxTotal[i] / el, g_ctxRate[i], el); rl += b;
+                    }
+                    if (!rl.empty()) LOG("[xma] ritmo desde el inicio:%s", rl.c_str());
+                    // Sesion 25: reloj de la cancion del juego (double en 82993A58, lo avanza sub_823D1490 con el mftb de cada vblank)
+                    // junto a las muestras totales de cada contexto, con la hora exacta: para medir la deriva musica/notas
+                    uint64_t raw = ((uint64_t)Load32(0x82993A58) << 32) | Load32(0x82993A5C); double songT; memcpy(&songT, &raw, 8);
+                    std::string tl; char b2[64];
+                    for (uint32_t i = 0; i < kContexts; i++)
+                        if (g_used[i] && g_ctxTotal[i] > 48000 * 20) { snprintf(b2, sizeof(b2), " %u:%llu", i, (unsigned long long)g_ctxTotal[i]); tl += b2; }
+                    LOG("[songclock] qpc %.4f cancion %.4f muestras%s", double(now.QuadPart) / f.QuadPart, songT, tl.c_str());
+                }
             }
             for (uint32_t i = 0; i < 16; i++)
             {
@@ -336,7 +359,7 @@ GUEST_IMPL(XMACreateContext)
 GUEST_IMPL(XMAReleaseContext)
 {
     uint32_t i = (ctx.r3.u32 - g_arrayGuest) / kContextSize;
-    if (i < kContexts) { std::lock_guard l(g_allocMutex); g_used[i] = false; std::lock_guard l2(g_decMutex); g_dec[i].Reset(); g_dec[i].enabled = false; }
+    if (i < kContexts) { std::lock_guard l(g_allocMutex); g_used[i] = false; std::lock_guard l2(g_decMutex); g_dec[i].Reset(); g_dec[i].enabled = false; g_ctxTotal[i] = 0; }
     ctx.r3.u64 = 0;
 }
 

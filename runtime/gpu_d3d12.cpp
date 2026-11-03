@@ -35,6 +35,9 @@ static uint16_t FloatToHalf(float f)
 }
 
 extern bool g_xlatNoGrad;   // gpu_shader.cpp (sesion 24)
+extern std::atomic<uint64_t> g_cpWaitUs;    // gpu_cp.cpp
+extern std::atomic<uint64_t> g_presentCalls, g_presentFallback;   // gpu_window.cpp
+extern std::atomic<uint64_t> g_vblankCount; // gpu_stub.cpp
 namespace
 {
 constexpr UINT kFrames = 2;
@@ -351,7 +354,7 @@ double QpcMs()
     static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
     LARGE_INTEGER c; QueryPerformanceCounter(&c); return double(c.QuadPart) * 1000.0 / double(f.QuadPart);
 }
-double g_hCompileMs = 0, g_hPsoMs = 0, g_hTexMs = 0, g_hWaitMs = 0;
+double g_hCompileMs = 0, g_hPsoMs = 0, g_hTexMs = 0, g_hWaitMs = 0, g_hTexUpMs = 0, g_hTexCreateMs = 0, g_hTexFillMs = 0; uint32_t g_hTexUps = 0, g_hTexNew = 0;
 uint32_t g_hCompiles = 0, g_hCacheHits = 0, g_hPsos = 0, g_hFlushes = 0;
 double g_hFlushMs = 0, g_hDrawMs = 0, g_hPresentMs = 0;
 thread_local bool t_prewarm = false;   // hilos de precompilacion: no cuentan en la medicion de tirones
@@ -1038,6 +1041,43 @@ ShaderEntry& GetShader(uint32_t type, const uint32_t* code, uint32_t count, uint
 
 uint64_t g_skipped[16] = {};
 
+// Sesion 24 (tirones en menus): las texturas 2D se crean dentro de montones grandes ya reservados (CreatePlacedResource) en lugar de
+// un recurso propio cada una (CreateCommittedResource ~0.3 ms: al recorrer la lista de canciones se crean 50-120 por cuadro).
+// Las texturas nunca se liberan (igual que antes con los recursos propios), asi que basta un reparto lineal. GH6_TEXCOMMITTED=1 = como antes.
+HRESULT CreateTextureResource(const D3D12_RESOURCE_DESC& desc0, ComPtr<ID3D12Resource>& out)
+{
+    static const bool committed = getenv("GH6_TEXCOMMITTED") != nullptr;
+    D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT };
+    if (!committed)
+    {
+        static std::vector<ComPtr<ID3D12Heap>> heaps;
+        static UINT64 used = 0, cap = 0;
+        static bool broken = false;
+        D3D12_RESOURCE_DESC desc = desc0;
+        desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;   // 4 KB si la textura es pequena (como haria el driver)
+        D3D12_RESOURCE_ALLOCATION_INFO ai = g_dev->GetResourceAllocationInfo(0, 1, &desc);
+        if (ai.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) { desc.Alignment = 0; ai = g_dev->GetResourceAllocationInfo(0, 1, &desc); }
+        if (!broken && ai.SizeInBytes != UINT64_MAX && ai.SizeInBytes <= (32ull << 20))
+        {
+            UINT64 off = (used + ai.Alignment - 1) & ~(ai.Alignment - 1);
+            if (heaps.empty() || off + ai.SizeInBytes > cap)
+            {
+                D3D12_HEAP_DESC hd{}; hd.SizeInBytes = 64ull << 20; hd.Properties = def; hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+                hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+                ComPtr<ID3D12Heap> h;
+                if (FAILED(g_dev->CreateHeap(&hd, IID_PPV_ARGS(&h)))) { broken = true; LOG("[d3d12] no se pudo crear un monton de texturas: recursos propios"); goto fallback; }
+                heaps.push_back(h); used = 0; cap = hd.SizeInBytes; off = 0;
+                if ((heaps.size() & (heaps.size() - 1)) == 0) LOG("[d3d12] montones de texturas: %zu (%llu MB)", heaps.size(), (unsigned long long)(heaps.size() * 64));
+            }
+            HRESULT hr = g_dev->CreatePlacedResource(heaps.back().Get(), off, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out));
+            if (SUCCEEDED(hr)) { used = off + ai.SizeInBytes; return hr; }
+            static int fails = 0; if (fails++ < 5) LOG("[d3d12] CreatePlacedResource fallo (%08X): recurso propio", (unsigned)hr);
+        }
+    }
+fallback:
+    return g_dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &desc0, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out));
+}
+
 // ---- texturas (sesion 8): solo mip base, formatos 8888 y DXT1/3/5 ----
 struct TexEntry { ComPtr<ID3D12Resource> res; DXGI_FORMAT fmt; uint64_t dataHash = 0; uint64_t lastFrame = 0; uint64_t resolveGen = 0; uint32_t levels = 1; };
 // Sesion 24: generacion de resolves por CPU por direccion de destino. Una textura se vuelve a subir si hubo un resolve nuevo a su
@@ -1205,7 +1245,7 @@ bool BindTexture(uint32_t tf, D3D12_CPU_DESCRIPTOR_HANDLE slot)
         }
     }
     // Sesion 24: texturas resueltas por GPU en k_8 (copia 8888, canal rojo) o k_32_FLOAT (copia R32_FLOAT); mismo tamano exacto
-    if (fmt == 2 || fmt == 36 || (fmt == 25 && !signedOrExp))
+    if (fmt == 2 || fmt == 36 || fmt == 31 || (fmt == 25 && !signedOrExp))
     {
         uint64_t k = ResolvedKey(base, w, h) ^ ResolvedFmtTag(fmt);
         auto last = g_resolvedLast.find(base);
@@ -1422,12 +1462,19 @@ bool BindTexture(uint32_t tf, D3D12_CPU_DESCRIPTOR_HANDLE slot)
     if (!noResolveGen) { auto gi = g_cpuResolveGen.find(base & 0xFFFFF000); if (gi != g_cpuResolveGen.end()) rgen = gi->second; }
     if (!e.res || e.dataHash != dh || texNoCache || e.resolveGen != rgen)
     {
+        // GH6_TEXSLOW=<ms>: registra las subidas de textura que tardan mas de <ms> (diagnostico de tirones en menus)
+        static const double texSlowMs = getenv("GH6_TEXSLOW") ? atof(getenv("GH6_TEXSLOW")) : -1.0;
+        struct SlowLog { double t0, lim; uint32_t base, fmt, w, h, levels; bool fresh, gen; ~SlowLog() { double ms = QpcMs() - t0; g_hTexUpMs += ms; g_hTexUps++; if (lim >= 0) { static int n = 0;
+            if (ms > lim && n++ < 600) LOG("[texlenta] %.1f ms %08X fmt %u %ux%u niveles %u %s (frame %llu)", ms, base, fmt, w, h, levels, fresh ? "nueva" : gen ? "resolve CPU" : "contenido cambiado", (unsigned long long)g_frameCounter); } } }
+            slowLog{ QpcMs(), texSlowMs, base, fmt, w, h, levels, !e.res, e.res && e.resolveGen != rgen };
         if (!e.res)
         {
             D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT };
             D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = bw * blockDim; td.Height = bh * blockDim;
             td.DepthOrArraySize = 1; td.MipLevels = (UINT16)levels; td.Format = df; td.SampleDesc.Count = 1;
-            if (FAILED(g_dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&e.res)))) return false;
+            double tc0 = QpcMs();
+            if (FAILED(CreateTextureResource(td, e.res))) return false;
+            g_hTexCreateMs += QpcMs() - tc0; g_hTexNew++;
             e.fmt = df; e.levels = levels;
         }
         else { auto b = Transition(e.res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST); g_list->ResourceBarrier(1, &b); }
@@ -1503,7 +1550,9 @@ bool BindTexture(uint32_t tf, D3D12_CPU_DESCRIPTOR_HANDLE slot)
             fillRows(src, bw, 0, std::min(bh, step), lpitch, pkX, pkY, dst, rowPitch);
             for (auto& t : th) t.join();
         };
+        double tf0 = QpcMs();
         fillLevel(src, bw, bh, tiled ? ((pitchBlocks + 31) & ~31u) : pitchBlocks, pkX, pkY, dst, rowPitch);
+        g_hTexFillMs += QpcMs() - tf0;
         // GH6_TEXDUMP=<base hex>: guarda los datos ya destileados de esa textura (formato sin bloques) en texdump_*.raw (sesion 24)
         if (static const char* td = getenv("GH6_TEXDUMP"); td && (base & 0xFFFFF000) == ((uint32_t)strtoul(td, nullptr, 16) & 0xFFFFF000))
         {
@@ -2312,6 +2361,7 @@ depthCpu:
     // 8888 con MSAA (media de muestras con shader), 8888 -> k_8 y k_32_FLOAT -> k_32_FLOAT. Se leen como textura resuelta.
     // GH6_OLDGPURESOLVE=1 = solo el caso anterior.
     static const bool oldGpuResolve = getenv("GH6_OLDGPURESOLVE") != nullptr;
+    static const bool no1616F = getenv("GH6_NO1616FGPU") != nullptr;
     uint32_t gpuTexFmt = 0; bool gpuShader = false;
     if (!cpuResolve && !destArray && !(fbMem && endian == 0) && w > 0 && h > 0 && src < 4 && cmd != 3 && destPitch)
     {
@@ -2320,6 +2370,9 @@ depthCpu:
         else if (!oldGpuResolve && rt8888 && fmt == 6 && g_colorResolvePso && g_rtvHeap3) { gpuTexFmt = 6; gpuShader = true; }
         else if (!oldGpuResolve && rt8888 && fmt == 2 && single) gpuTexFmt = 2;
         else if (!oldGpuResolve && rt->fmt == DXGI_FORMAT_R32_FLOAT && fmt == 36 && single && expBias == 0) gpuTexFmt = 36;
+        // Sesion 24 (tirones): k_16_16_FLOAT desde un RT 16_16_FLOAT (buffer de 320x180 de un efecto de posproceso): copia directa.
+        // Antes iba por la CPU y bajaba a 40-50 fps mientras el efecto estaba activo. GH6_NO1616FGPU=1 = como antes.
+        else if (!oldGpuResolve && !no1616F && rt->fmt == DXGI_FORMAT_R16G16_FLOAT && fmt == 31 && single && expBias == 0) gpuTexFmt = 31;
         else if (!oldGpuResolve && rt->fmt == DXGI_FORMAT_R16G16_SNORM && fmt == 25 && single && expBias == 0 && g_colorResolvePso1616 && g_rtvHeap3)
         { gpuTexFmt = 25; gpuShader = true; }
     }
@@ -2365,7 +2418,7 @@ depthCpu:
             if (ageAddr && (destBase & 0xFFFFF000) == ageAddr && rlogs++ < 400)
                 LOG("[texage] resolve -> %08X en el frame %llu: %ux%u desde base %u (rect %d,%d-%d,%d), gpu %d", destBase, (unsigned long long)g_frameCounter, w, h, rt->base, x0, y0, x1, y1, (int)gpuPath);
         }
-        DXGI_FORMAT resFmt = gpuTexFmt == 36 ? DXGI_FORMAT_R32_FLOAT : gpuTexFmt == 25 ? (g_1616Sat ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R16G16_FLOAT) : DXGI_FORMAT_B8G8R8A8_UNORM;
+        DXGI_FORMAT resFmt = gpuTexFmt == 36 ? DXGI_FORMAT_R32_FLOAT : gpuTexFmt == 31 ? DXGI_FORMAT_R16G16_FLOAT : gpuTexFmt == 25 ? (g_1616Sat ? DXGI_FORMAT_R16G16_UNORM : DXGI_FORMAT_R16G16_FLOAT) : DXGI_FORMAT_B8G8R8A8_UNORM;
         if (r.res && (r.fmt != resFmt || (gpuShader && r.rtv == ~0u) || r.w != (UINT)w || r.h != (UINT)h))
         {   // otro formato o hace falta poder dibujar en ella: se recrea (el recurso viejo se libera cuando la GPU acabe el frame)
             g_deferredRelease[g_fi].push_back(r.res); r.res.Reset();
@@ -2638,7 +2691,7 @@ static void WriteBackResolved(ResolvedTex& r)
     if (!p) return;
     uint8_t* out = g_base + (0xA0000000u | (r.destBase & 0x1FFFFFFF));
     uint32_t pitchAligned = (r.destPitch + 31) & ~31u, maxH = r.destH ? r.destH : 0x3FFF;
-    if (r.texFmt == 2 || r.texFmt == 36 || r.texFmt == 25)
+    if (r.texFmt == 2 || r.texFmt == 36 || r.texFmt == 25 || r.texFmt == 31)
     {   // sesion 24: k_8 = canal rojo (byte 2 de BGRA) con tiling de 1 byte; k_32_FLOAT = palabra con el endian del destino
         for (uint32_t y = 0; y < r.h && y < maxH; y++)
         {
@@ -2647,7 +2700,7 @@ static void WriteBackResolved(ResolvedTex& r)
             {
                 const uint8_t* px = p + y * rowPitch + x * 4;
                 if (r.texFmt == 2) *(out + TiledInner(x, y, 0, outer)) = px[2];
-                else if (r.fmt == DXGI_FORMAT_R16G16_FLOAT)
+                else if (r.texFmt == 25 && r.fmt == DXGI_FORMAT_R16G16_FLOAT)
                 {   // 16_16 sin recortar (sesion 24): en memoria, entero de 16 bits con 0x7FFF = 32 (como Xenia)
                     uint32_t wv = 0;
                     for (int k = 0; k < 2; k++)
@@ -3496,6 +3549,9 @@ void OverlayRender(const char* text, COLORREF color)
     g_overlayDirty = true;
 }
 // Estadisticas por presentacion; el texto se rehace cada 0,5 s
+// Sesion 24: hora de la ultima presentacion (por GPU o desde memoria) para el detector de tirones. Antes solo contaba la ruta por
+// GPU y las pantallas de carga (el juego presenta un frontbuffer antiguo, leido de memoria, a 60 fps) salian como tirones de 250-550 ms.
+double g_hitchLast = 0;
 void OverlayTick()
 {
     static double lastT = 0, winStart = 0, sumDt = 0, maxDt = 0; static int frames = 0, hitches = 0;
@@ -3704,7 +3760,7 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
     SavePsoLibrary(false);
     {   // Tirones: intervalo entre presentaciones por encima del umbral, con el desglose de lo que costo ese frame
         static const double hitchMs = getenv("GH6_HITCHMS") ? atof(getenv("GH6_HITCHMS")) : 40.0;
-        static double last = 0; static uint64_t hn = 0, hitches = 0; double now = QpcMs(); hn++;
+        double& last = g_hitchLast; static uint64_t hn = 0, hitches = 0; double now = QpcMs(); hn++;
         double dt = last > 0 ? now - last : 0; last = now;
         {   // GH6_FRAMELOG=<desde>:<cuantos>: draws y tiempo de cada frame presentado (ritmo de la escena 3D, sesion 24)
             static long long flFrom = -1, flCount = 0;
@@ -3713,10 +3769,14 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
             if (flFrom >= 0 && (long long)hn >= flFrom && (long long)hn < flFrom + flCount)
                 LOG("[framelog] %llu: %.1f ms, draws %llu (%.1f ms), present %.1f ms, espera GPU %.1f ms", (unsigned long long)hn, dt, (unsigned long long)g_frameDraws, g_hDrawMs, g_hPresentMs, g_hWaitMs);
         }
+        static uint64_t lSw = 0, lVb = 0, lWait = 0, lDraws = 0, lPc = 0, lPf = 0;
+        uint64_t pc = g_presentCalls.load(), pf = g_presentFallback.load(), sw = GpuGetStats().swaps.load(), vb = g_vblankCount.load(), wt = g_cpWaitUs.load(), dr = GpuGetStats().draws.load();
         if (dt > hitchMs && hitches++ < 2000)
-            LOG("[tiron] frame %llu: %.0f ms | compilar %.0f ms (%u nuevos, %u de cache) | PSO %.0f ms (%u) | texturas %.0f ms | espera GPU %.0f ms | vaciados %.0f ms (%u)",
-                (unsigned long long)hn, dt, g_hCompileMs, g_hCompiles, g_hCacheHits, g_hPsoMs, g_hPsos, g_hTexMs, g_hWaitMs, g_hFlushMs, g_hFlushes);
-        g_hCompileMs = g_hPsoMs = g_hTexMs = g_hWaitMs = g_hFlushMs = g_hDrawMs = g_hPresentMs = 0; g_hCompiles = g_hCacheHits = g_hPsos = g_hFlushes = 0;
+            LOG("[tiron] frame %llu: %.0f ms | compilar %.0f ms (%u nuevos, %u de cache) | PSO %.0f ms (%u) | texturas %.0f ms | espera GPU %.0f ms | vaciados %.0f ms (%u) | swaps %llu vblanks %llu draws %llu, CP esperando %.0f ms | presentaciones %llu (%llu desde memoria) | subidas %u (%.0f ms; %u nuevas, crear %.1f ms, destilear base %.1f ms)",
+                (unsigned long long)hn, dt, g_hCompileMs, g_hCompiles, g_hCacheHits, g_hPsoMs, g_hPsos, g_hTexMs, g_hWaitMs, g_hFlushMs, g_hFlushes,
+                (unsigned long long)(sw - lSw), (unsigned long long)(vb - lVb), (unsigned long long)(dr - lDraws), (wt - lWait) / 1000.0, (unsigned long long)(pc - lPc), (unsigned long long)(pf - lPf), g_hTexUps, g_hTexUpMs, g_hTexNew, g_hTexCreateMs, g_hTexFillMs);
+        lSw = sw; lVb = vb; lWait = wt; lDraws = dr; lPc = pc; lPf = pf;
+        g_hCompileMs = g_hPsoMs = g_hTexMs = g_hWaitMs = g_hFlushMs = g_hDrawMs = g_hPresentMs = g_hTexUpMs = g_hTexCreateMs = g_hTexFillMs = 0; g_hTexUps = g_hTexNew = 0; g_hCompiles = g_hCacheHits = g_hPsos = g_hFlushes = 0;
     }
     static uint64_t n = 0;
     if (++n % 120 == 0)
@@ -3813,5 +3873,6 @@ bool D3D12Present(HWND hwnd, const uint32_t* pixels, uint32_t w, uint32_t h)
         (unsigned long long)frames, (unsigned long long)g_frameDraws, (unsigned long long)g_skipped[0], (unsigned long long)g_skipped[1],
         (unsigned long long)g_skipped[2], (unsigned long long)g_skipped[3], g_shaders.size(), g_psos.size(), (unsigned long long)g_resolves, (unsigned long long)g_fbResolves, g_edramRts.size());
     if (FAILED(hr)) { LOG("[d3d12] Present fallo (0x%08lX)", (unsigned long)hr); g_failed = true; return false; }
+    g_hitchLast = QpcMs(); OverlayTick();
     return true;
 }

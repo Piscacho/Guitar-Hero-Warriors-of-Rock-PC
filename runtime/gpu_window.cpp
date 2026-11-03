@@ -228,8 +228,10 @@ static void RawDumpForShot(const char* name)
 }
 
 
+std::atomic<uint64_t> g_presentCalls{ 0 }, g_presentFallback{ 0 };   // para el log de tirones (gpu_d3d12.cpp)
 void GpuPresent()
 {
+    g_presentCalls++;
     static DWORD lastTitle = 0;
     static bool useD3D12 = getenv("GH6_GDI") == nullptr;
     DWORD now = GetTickCount();
@@ -272,6 +274,7 @@ void GpuPresent()
     if (useD3D12)
     {
         uint32_t w = 0, h = 0;
+        g_presentFallback++;
         bool ok = !getenv("GH6_NOFRONTBUFFER") && ReadFrontbuffer(w, h);
         // GH6_DUMPFRAME=a,b,c: vuelca el frontbuffer al alcanzar (o pasar) cada uno de esos swaps
         static std::vector<long long> dumpList = [] {

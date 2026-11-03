@@ -1253,6 +1253,7 @@ std::atomic<uint64_t> g_audioFrames{ 0 }, g_audioSubmits{ 0 };
 std::atomic<bool> g_audioThread{ false };
 }
 size_t AudioQueuedFrames();     // audio_wasapi.cpp
+void AudioSetTargetFrames(uint32_t f);
 uint64_t AudioUnderruns();
 bool AudioOutputActive();
 namespace
@@ -1265,9 +1266,38 @@ void AudioPump()
     LARGE_INTEGER freq, t0, now; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&t0);
     timeBeginPeriod(1);
     static bool clocked = getenv("GH6_NOAUDIO") != nullptr;   // sin salida de audio: ritmo por reloj
+    // Sesion 25 (desfase de audio): el juego genera siempre al ritmo del reloj del PC (n * 256 / 48000 s desde el arranque), igual que
+    // el reloj de las notas; audio_wasapi.cpp adapta ese flujo a la tarjeta. Tras un paron se llama al juego seguido hasta ponerse al
+    // dia (sin saltar audio: si se saltara, la musica quedaria atrasada para siempre); solo con mas de 5 s de retraso se reinicia.
+    // GH6_AUDIOTARJETA=1 = ritmo marcado por la cola de la tarjeta (antes).
+    static const bool cardClock = getenv("GH6_AUDIOTARJETA") != nullptr;
     for (uint64_t n = 1;; n++)
     {
-        if (clocked || !AudioOutputActive())
+        if (!clocked && !cardClock && AudioOutputActive())
+        {
+            static const size_t minMs = (size_t)std::clamp(getenv("GH6_AUDIOMS") ? atoi(getenv("GH6_AUDIOMS")) : 20, 5, 250);
+            static const size_t maxMs = std::max(minMs, (size_t)std::clamp(getenv("GH6_AUDIOMAX") ? atoi(getenv("GH6_AUDIOMAX")) : 80, 5, 250));
+            static const bool fixedQ = getenv("GH6_AUDIOFIJO") != nullptr;
+            static size_t curMs = minMs; static uint64_t lastUnder = 0; static DWORD lastChange = GetTickCount();
+            if (!fixedQ)
+            {
+                uint64_t u = AudioUnderruns(); DWORD nowT = GetTickCount();
+                if (u != lastUnder)
+                {
+                    lastUnder = u;
+                    if (curMs < maxMs && nowT - lastChange > 1000) { curMs = std::min(maxMs, curMs + 5); lastChange = nowT; LOG("[audio] corte de audio: cola %zu ms", curMs); }
+                }
+                // con el reloj del PC la cola baja mas despacio (20 s sin cortes, luego 1 ms cada 2 s): si no, los microcortes se repiten
+                else if (curMs > minMs && nowT - lastChange > 20000) { curMs--; lastChange = nowT - 18000; }
+            }
+            AudioSetTargetFrames((uint32_t)(48 * curMs));
+            LONGLONG target = t0.QuadPart + (LONGLONG)(n * 256 * freq.QuadPart / 48000);
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart - target > 5 * freq.QuadPart)   // solo con parones enormes (depurador, suspension)
+            { LOG("[audio] %lld ms de retraso: se reinicia el reloj de audio", (long long)((now.QuadPart - target) * 1000 / freq.QuadPart)); t0 = now; n = 1; }
+            else for (;;) { QueryPerformanceCounter(&now); LONGLONG left = target - now.QuadPart; if (left <= 0) break; if (left > freq.QuadPart / 500) Sleep(1); else YieldProcessor(); }
+        }
+        else if (clocked || !AudioOutputActive())
         {
             // siguiente instante: n * 256 / 48000 s
             LONGLONG target = t0.QuadPart + (LONGLONG)(n * 256 * freq.QuadPart / 48000);

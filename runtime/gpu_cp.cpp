@@ -63,6 +63,7 @@ enum : uint32_t
 };
 
 std::atomic<uint32_t> g_ringPhys{ 0 }, g_ringDwords{ 0 }, g_writebackPhys{ 0 };
+
 std::atomic<uint32_t> g_irqCallback{ 0 }, g_irqUserData{ 0 };
 std::atomic<bool> g_started{ false };
 std::mutex g_irqMutex;
@@ -131,6 +132,7 @@ void GpuDispatchInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu)
     fn(ctx, g_base);
     ctx.r1.u64 = r1; ctx.r13.u64 = r13;
 }
+std::atomic<uint64_t> g_cpWaitUs{ 0 };   // tiempo total del procesador de comandos en WAIT_REG_MEM (para el log de tirones)
 void GpuSetInterruptCallback(uint32_t cb, uint32_t user) { g_irqCallback = cb; g_irqUserData = user; }
 void GpuSetRingBuffer(uint32_t phys, uint32_t sizeLog2) { g_ringPhys = phys; g_ringDwords = (1u << (sizeLog2 + 3)) / 4; }
 void GpuSetReadPointerWriteback(uint32_t phys) { g_writebackPhys = phys; }
@@ -197,10 +199,22 @@ bool ExecutePacket(Reader& rd, int depth)
             if (wl < 30 && g_waitLog) { wl++; LOG("[waitregmem] info=%X addr=%08X ref=%X mask=%X", info, addr, ref, mask); }
             if ((info & 0x10) && D3D12FlushPendingResolves()) g_flushByOp[0x3C]++;
         }
+        LARGE_INTEGER wt0; QueryPerformanceCounter(&wt0);
         for (int spins = 0;; spins++)
         {
             uint32_t v = (info & 0x10) ? GpuLoad(addr) : Reg(addr & 0xFFFF);
-            if (Compare(info, v & mask, ref)) break;
+            if (Compare(info, v & mask, ref))
+            {
+                if (spins > 100) { LARGE_INTEGER t1, f; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f); g_cpWaitUs += (uint64_t)(1e6 * (t1.QuadPart - wt0.QuadPart) / f.QuadPart); }
+                if (spins > 100 && g_waitLog)
+                {   // diagnostico: esperas largas (GH6_WAITLOG)
+                    LARGE_INTEGER t1, f; QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
+                    double ms = 1000.0 * (t1.QuadPart - wt0.QuadPart) / f.QuadPart;
+                    static std::atomic<int> ll{ 0 };
+                    if (ms > 20.0 && ll++ < 400) LOG("[waitlarga] %.1f ms info=%X addr=%08X ref=%X mask=%X v=%X swap %llu", ms, info, addr, ref, mask, v, (unsigned long long)g_stats.swaps.load());
+                }
+                break;
+            }
             if (spins > 200000) { LOG("[gpu] WAIT_REG_MEM sin cumplirse (info=%X addr=%08X ref=%X mask=%X v=%X)", info, addr, ref, mask, v); break; }
             if (spins > 100) Sleep(0);
         }
@@ -495,10 +509,19 @@ void GpuStartCommandProcessor()
         uint32_t addr = (uint32_t)strtoul(w, nullptr, 16);
         std::thread([addr] {
             uint32_t last = 0; int n = 0;
+            // GH6_WATCHGAP=<ms>: solo registra los cambios que llegan tras mas de <ms> sin cambiar (contadores que se atascan)
+            static int gap = getenv("GH6_WATCHGAP") ? atoi(getenv("GH6_WATCHGAP")) : 0;
+            ULONGLONG lastT = GetTickCount64();
             for (;;)
             {
                 uint32_t v = Load32(addr);
-                if (v != last && n < 3000) { n++; LOG("[watch] %08X = %08X (draw %llu, swap %llu)", addr, v, (unsigned long long)g_stats.draws.load(), (unsigned long long)g_stats.swaps.load()); last = v; }
+                if (v != last && gap)
+                {
+                    ULONGLONG t = GetTickCount64();
+                    if (t - lastT > (ULONGLONG)gap && n < 3000) { n++; LOG("[watch] %08X = %08X tras %llu ms (swap %llu)", addr, v, t - lastT, (unsigned long long)g_stats.swaps.load()); }
+                    lastT = t; last = v;
+                }
+                else if (v != last && n < 3000) { n++; LOG("[watch] %08X = %08X (draw %llu, swap %llu)", addr, v, (unsigned long long)g_stats.draws.load(), (unsigned long long)g_stats.swaps.load()); last = v; }
                 for (int i = 0; i < 50; i++) _mm_pause();
             }
         }).detach();

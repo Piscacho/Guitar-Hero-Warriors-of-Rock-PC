@@ -833,3 +833,52 @@ puntuación/estrella con bloques blancos.
   (run\lut_compare.png).
 - Otros tirones de esa partida: cargas de inicio/fin de cancion (267-584 ms, CPU del juego) y un shader nuevo compilado una vez
   (234 ms, queda en la cache).
+
+## v1.2.0 publicada (2026-11-02)
+- Commit bb48b26; release v1.2.0 (SHA-256 cc797c70...); release v1.1.1 borrada. Actualizacion real v1.1.1 -> v1.2.0 comprobada.
+- Prueba del usuario antes de publicar (punkstage): rebanadas 3D por GPU, 0 ms de vaciados, tirones solo de carga.
+
+## Bajadas de fps a 40-50 sin tirones (sesion del usuario en punkstage, v1.2.0)
+- Tres tramos (inicio de cancion, tras quitar la pausa y cerca del final) con 1-2 resolves por CPU por cuadro y
+  "textura 16EAC000 (320x180 formato 31) subida 100 veces": resolve de un RT 16_16_FLOAT (superficie formato 6, DXGI 34) a una
+  textura k_16_16_FLOAT de 320x180 (probablemente la distorsion por calor de la pirotecnia: solo sale si la banda va bien, por eso
+  los guiones no la disparan; aparecio en quest4.log).
+- Arreglo: gpuTexFmt 31 (copia directa R16G16_FLOAT, misma ruta de lectura que k_8/k_32_FLOAT/k_16_16; volcado a memoria con los
+  medios flotantes tal cual). GH6_NO1616FGPU=1 = como antes. Sin poder reproducirlo automaticamente: pendiente de la prueba del usuario.
+- Resto de tirones de esa sesion: menus/vistas previas, carga de cancion, quitar la pausa (song_unpause.pak, 284 ms), resultados.
+- Prueba del usuario (punkstage, 2 canciones: una de DLC y We're Not Gonna Take It): el efecto 16_16_FLOAT aparecio (resolves fmt 31)
+  y fue por GPU (sin "textura cambiante", 0 resolves por CPU); 59-60 fps durante las canciones. Tirones solo en menus, cargas y
+  resultados; el mayor (867 ms) al empezar la cancion de DLC: XamContentCreate de CONT0 + apertura de adlc760_*.fsb (montaje del DLC).
+
+## Tirones en menus (2026-11-02, scripts\songlist_scan.txt)
+- Los "tirones" de 250-550 ms de menus/transiciones eran falsos: el juego seguia presentando a 60 fps un frontbuffer antiguo (sin
+  resolve por GPU reciente -> GpuPresent lee la memoria y usa D3D12Present) y el detector solo contaba la ruta por GPU. Ahora
+  g_hitchLast lo actualizan las dos rutas (y OverlayTick tambien). El [tiron] lleva ademas swaps, vblanks, draws, espera del CP en
+  WAIT_REG_MEM, presentaciones (desde memoria) y subidas de textura (nuevas, crear, destilear).
+- Los tirones reales (50-100 ms al recorrer la lista) eran 50-190 texturas nuevas por cuadro; CreateCommittedResource ~0.3 ms cada
+  una (55-60 % del tiempo). Arreglo: CreateTextureResource = recursos colocados en montones de 64 MB (reparto lineal, alineacion
+  de 4 KB si cabe; las texturas nunca se liberaban de todos modos). ~0.015 ms por textura. GH6_TEXCOMMITTED=1 = como antes.
+- Resultado en el mismo guion: 19 avisos / 3178 ms -> 4 / 235 ms (quedan 50-67 ms al entrar en la cancion: ~125 texturas nuevas).
+- Diagnostico: GH6_WAITLOG=1 registra esperas WAIT_REG_MEM > 20 ms (la de cada cuadro es 16A40006 == 0, ~13 ms, ritmo de vblank);
+  GH6_TEXSLOW=<ms> registra subidas lentas; GH6_WATCH + GH6_WATCHGAP=<ms> solo registra cambios tras <ms> sin cambiar.
+- Hilos del juego en esas pausas: el principal espera al de presentacion (sub_8242ABE8 / sub_8242C450, bandera 82A81D80); el de
+  presentacion (sub_825840F0) espera vblanks (contadores 8298C1E0/8298C1F0) y sitio en el anillo (sub_822DB898). No es el CP.
+
+## Desfase de audio durante la cancion (2026-11-02, sesion 25)
+- Medida ([desfase] en el log cada ~10 s, guion song_play.txt con audio): la interfaz USB del usuario (Behringer UMC202HD) va
+  ~180 ppm mas lenta que el reloj del PC. El juego generaba audio al ritmo de la tarjeta y las notas van con el reloj (mftb a 50 MHz
+  desde QPC): la musica se atrasaba ~11 ms al 25 %, ~22 al 50 %, ~32 al 75 % y ~43 ms al final de Burnin' for You, y cada
+  corte de audio sumaba su hueco para siempre.
+- Arreglo: AudioPump llama al juego al ritmo del reloj del PC (n*256/48000 s; tras un paron se pone al dia sin saltar audio, solo
+  reinicia con > 5 s) y la salida WASAPI mantiene la cola cerca del objetivo remuestreando como mucho 0,2 % (lineal, media de la
+  cola ~0,5 s) y descarta de golpe lo que pase de 60 ms. La cola adaptativa baja ahora tras 20 s sin cortes (1 ms cada 2 s).
+  GH6_AUDIOTARJETA=1 = como antes.
+- Resultado: lo que suena va 24-42 ms por detras del reloj durante toda la cancion (retraso fijo de cola+WASAPI), sin deriva;
+  la deriva de la tarjeta (43 ms en 4 min) queda compensada. Pendiente: prueba del usuario.
+- Prueba del usuario: seguia oyendo la ultima nota despues de tocarla, con la salida ya plana. Causa real (medida con
+  [songclock]: reloj de la cancion del juego, double en 82993A58, junto a las muestras de las pistas XMA): el reloj de las notas
+  iba un 0,25 % rapido. sub_823A0288 lee KeQueryPerformanceFrequency y, si vale 50000000, lo cambia por 49875000 (en la 360 real
+  el time base va a 49,875 MHz aunque el kernel diga 50 MHz); sub_823D1490 avanza la cancion con la duracion (mftb) de los
+  vblanks / esa frecuencia. Nuestro mftb iba a 50 MHz -> notas adelantadas +121/+221/+348/+464 ms al 25/50/75/100 % de
+  Burnin' for You. Arreglo: ppc_mftb a 49,875 MHz (KeQueryPerformanceFrequency sigue en 50 MHz, como la consola). GH6_TB50=1 = antes.
+  Resultado: -5/+4/-4/-3 ms. Herramienta: scratchpad songclock.py (o el calculo por tramos de ctx de pista).

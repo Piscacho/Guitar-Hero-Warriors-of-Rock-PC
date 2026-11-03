@@ -32,6 +32,15 @@ std::atomic<uint64_t> g_submitted{ 0 };
 std::atomic<uint32_t> g_lastPad{ 0 };   // relleno de WASAPI en la ultima vuelta (para el contador en pantalla)   // frames estereo entregados por el juego desde el arranque (medida de latencia)
 // Medida del retraso de salida (sesion 24): cola propia + relleno de WASAPI + latencia del motor de audio de Windows
 std::atomic<uint64_t> g_padSum{ 0 }, g_queueSum{ 0 }, g_samples{ 0 }; std::atomic<uint32_t> g_streamLatFrames{ 0 };
+// Sesion 25 (desfase): frames de silencio metidos por falta de datos y frames del juego descartados por exceso de cola
+std::atomic<uint64_t> g_silenceFrames{ 0 }, g_dropFrames{ 0 };
+IAudioClock* g_clock = nullptr; uint64_t g_clockFreq = 0;
+// Sesion 25 (desfase): el juego genera el audio al ritmo del reloj del PC (el mismo de las notas) y aqui se mantiene la cola cerca
+// de este objetivo remuestreando muy poco (como mucho 0,2 %, inaudible): asi la deriva del reloj de la tarjeta (medido ~180 ppm en
+// una interfaz USB, ~45 ms al final de una cancion) y los huecos por cortes no se acumulan. GH6_AUDIOTARJETA=1 = ritmo de la tarjeta (antes).
+std::atomic<uint32_t> g_targetFrames{ 960 };
+double g_resFrac = 0, g_levelEma = -1;   // protegidos por g_mutex
+std::atomic<uint64_t> g_trimFrames{ 0 };
 
 void RenderThread()
 {
@@ -93,6 +102,7 @@ void RenderThread()
     UINT32 targetPad = lowPeriod ? std::min<UINT32>(bufFrames, std::max<UINT32>(2 * lowPeriod, kRate * 4 / 1000))
                                  : std::min<UINT32>(bufFrames, std::max<UINT32>((UINT32)(kRate * std::max(wasapiMs, 1) / 1000), 2 * periodFrames));
     REFERENCE_TIME lat = 0; client->GetStreamLatency(&lat); g_streamLatFrames = (uint32_t)(lat * kRate / 10000000);
+    if (SUCCEEDED(client->GetService(__uuidof(IAudioClock), (void**)&g_clock))) { UINT64 f = 0; g_clock->GetFrequency(&f); g_clockFreq = f; }
     client->Start();
     g_running = true;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);   // sesion 23
@@ -108,14 +118,44 @@ void RenderThread()
         float* out = (float*)data;
         {
             std::lock_guard l(g_mutex);
-            UINT32 n = (UINT32)std::min<size_t>(want, g_count);
-            for (UINT32 i = 0; i < n; i++)
+            static const bool cardClock = getenv("GH6_AUDIOTARJETA") != nullptr;
+            UINT32 n = 0;
+            if (cardClock)
             {
-                size_t r = (g_read + i) % kRingFrames;
-                out[i * 2] = g_ring[r * 2]; out[i * 2 + 1] = g_ring[r * 2 + 1];
+                n = (UINT32)std::min<size_t>(want, g_count);
+                for (UINT32 i = 0; i < n; i++)
+                {
+                    size_t r = (g_read + i) % kRingFrames;
+                    out[i * 2] = g_ring[r * 2]; out[i * 2 + 1] = g_ring[r * 2 + 1];
+                }
+                g_read = (g_read + n) % kRingFrames; g_count -= n;
             }
-            g_read = (g_read + n) % kRingFrames; g_count -= n;
-            if (n < want) { memset(out + n * 2, 0, (want - n) * 8); if (g_started) g_underruns++; }
+            else
+            {
+                // Nivel medio de la cola (media exponencial, ~0,5 s) frente al objetivo
+                double target = g_targetFrames.load();
+                g_levelEma = g_levelEma < 0 ? double(g_count) : g_levelEma + (double(g_count) - g_levelEma) * std::min(1.0, want / 24000.0);
+                double err = g_levelEma - target;
+                if (err > 2880 && double(g_count) > target)
+                {   // mas de 60 ms de sobra (el juego se puso al dia tras un paron): se descarta de golpe lo atrasado
+                    size_t drop = g_count - (size_t)target;
+                    g_read = (g_read + drop) % kRingFrames; g_count -= drop; g_trimFrames += drop; g_levelEma = target; err = 0;
+                }
+                double ratio = 1.0 + std::clamp(err / 48000.0 * 0.2, -0.002, 0.002);
+                // remuestreo lineal: por cada muestra de salida se avanzan 'ratio' muestras de entrada
+                for (; n < want; n++)
+                {
+                    if (g_count < 2) break;
+                    size_t r0 = g_read, r1 = (g_read + 1) % kRingFrames;
+                    float f = (float)g_resFrac;
+                    out[n * 2] = g_ring[r0 * 2] + (g_ring[r1 * 2] - g_ring[r0 * 2]) * f;
+                    out[n * 2 + 1] = g_ring[r0 * 2 + 1] + (g_ring[r1 * 2 + 1] - g_ring[r0 * 2 + 1]) * f;
+                    g_resFrac += ratio;
+                    size_t adv = (size_t)g_resFrac; g_resFrac -= double(adv);
+                    adv = std::min(adv, g_count); g_read = (g_read + adv) % kRingFrames; g_count -= adv;
+                }
+            }
+            if (n < want) { memset(out + n * 2, 0, (want - n) * 8); if (g_started) { g_underruns++; g_silenceFrames += want - n; } }
         }
         render->ReleaseBuffer(want, 0);
     }
@@ -146,7 +186,7 @@ void AudioSubmitXenonFrame(const uint8_t* src)
         float c = ch(2, i) * 0.7071f;
         float L = ch(0, i) + c + ch(4, i) * 0.7071f;
         float R = ch(1, i) + c + ch(5, i) * 0.7071f;
-        if (g_count >= kMaxLatencyFrames) { g_read = (g_read + 1) % kRingFrames; g_count--; g_drops++; }
+        if (g_count >= kMaxLatencyFrames) { g_read = (g_read + 1) % kRingFrames; g_count--; g_drops++; g_dropFrames++; }
         size_t w = (g_read + g_count) % kRingFrames;
         g_ring[w * 2] = std::clamp(L, -1.0f, 1.0f); g_ring[w * 2 + 1] = std::clamp(R, -1.0f, 1.0f);
         g_count++;
@@ -163,6 +203,24 @@ void AudioSubmitXenonFrame(const uint8_t* src)
         if (fp < 0.0005f && lastFp > 0.05f) { g_dropouts++; g_dropoutsWin++; }
         lastFp = fp;
     }
+    // Sesion 25 (desfase): cada ~10 s, reloj real desde el primer frame frente a las muestras entregadas por el juego y a la
+    // posicion de reproduccion del dispositivo. "atraso" > 0 = el audio va por detras del reloj (huecos o tarjeta mas lenta).
+    {
+        static LARGE_INTEGER f0{}, t0{}; static uint64_t sub0 = 0, dev0 = 0;
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        uint64_t devPos = 0; if (g_clock && g_clockFreq) { UINT64 p = 0, qpc = 0; if (SUCCEEDED(g_clock->GetPosition(&p, &qpc))) devPos = p * kRate / g_clockFreq; }
+        if (!t0.QuadPart) { QueryPerformanceFrequency(&f0); t0 = now; sub0 = g_submitted.load(); dev0 = devPos; }
+        static uint64_t nlog = 0;
+        if (++nlog % 1875 == 0)
+        {
+            double wall = double(now.QuadPart - t0.QuadPart) / f0.QuadPart;
+            double sub = (g_submitted.load() - sub0) / double(kRate), dev = (devPos - dev0) / double(kRate);
+            // lo que suena ahora = entregado - cola propia - buffer de WASAPI: su atraso frente al reloj es el desfase con las notas
+            double heard = (double(g_submitted.load() - sub0) - double(g_count) - double(g_lastPad.load())) / kRate;
+            LOG("[desfase] t=%.1f s | lo que suena va %+.1f ms por detras del reloj | juego entrego %.3f s (atraso %+.1f ms) | tarjeta reprodujo %.3f s (atraso %+.1f ms) | silencios %.1f ms, descartes %.1f ms, recortes %.1f ms, cola media %.1f ms",
+                wall, (wall - heard) * 1000, sub, (wall - sub) * 1000, dev, (wall - dev) * 1000, g_silenceFrames.load() / 48.0, g_dropFrames.load() / 48.0, g_trimFrames.load() / 48.0, g_levelEma / 48.0);
+        }
+    }
     // Nivel de pico cada ~5 s (para comprobar en el log que llega sonido de verdad)
     if (++g_frames % 940 == 0)
     {
@@ -175,6 +233,7 @@ void AudioSubmitXenonFrame(const uint8_t* src)
     }
 }
 uint64_t AudioSubmitted() { return g_submitted.load(); }
+void AudioSetTargetFrames(uint32_t f) { g_targetFrames = f; }
 // Retraso de salida aproximado ahora mismo (cola propia + buffer de WASAPI + latencia del motor), en ms; 0 si no hay audio
 float AudioLatencyNowMs()
 {

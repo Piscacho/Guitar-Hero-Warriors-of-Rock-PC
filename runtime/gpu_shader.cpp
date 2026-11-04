@@ -429,8 +429,25 @@ void EmitTextureFetch(Gen& g, const uint32_t* w, TranslatedShader& ts)
         // filtro lineal mezclaban la profundidad empaquetada que restaura C316F389 y la luz de los focos fallaba a rayas en los
         // personajes. Se lee el centro del texel (como el texel que elegiria el filtro de punto). GH6_NODENORMCENTER=1 = antes.
         static bool noDenormCenter = getenv("GH6_NODENORMCENTER") != nullptr;
-        if (denorm && !ox && !oy && !noDenormCenter) g.L("uv += 0.5;");
-        if (denorm) g.L("uv /= tsz;");
+        // Sesion 25: con resolucion interna las texturas resueltas son Rs veces mayores; XTexMode.z bits 8-11 = ese factor (0/1 = normal).
+        // Solo se emite con GH6_RESOLUCION > 1 / panoramico para no cambiar el HLSL (ni la cache de shaders) a 720p.
+        static const bool resScaled = getenv("GH6_RESOLUCION") && atoi(getenv("GH6_RESOLUCION")) > 1;
+        static const bool panoT = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
+        if (denorm && (resScaled || panoT))
+        {
+            // La posicion de pixel llega como pos / escala: entero = pixel del juego (los calculos enteros del shader no cambian) y
+            // fraccion = subpixel. Textura escalada: se lee el subpixel exacto (o el centro del primero si la coordenada es entera);
+            // textura normal: el centro del texel, como antes.
+            if (panoT) g.L("float2 tsc = float2(((XTexMode[%u].z >> 8) & 255u) ? ((XTexMode[%u].z >> 8) & 255u) / 16.0 : 1.0, ((XTexMode[%u].z >> 16) & 255u) ? ((XTexMode[%u].z >> 16) & 255u) / 16.0 : 1.0);", tf, tf, tf, tf);
+            else g.L("float2 tsc = (float)max(1u, (XTexMode[%u].z >> 8) & 15u);", tf);
+            if (!ox && !oy && !noDenormCenter) g.L("{ float2 fD = frac(uv); uv = (tsc > 1.0) ? floor(uv) + (fD > 0.0 ? fD : 0.5 / tsc) : floor(uv) + 0.5; }");
+            g.L("uv /= tsz / tsc;");
+        }
+        else
+        {
+            if (denorm && !ox && !oy && !noDenormCenter) g.L("uv += 0.5;");
+            if (denorm) g.L("uv /= tsz;");
+        }
         // Sesion 24: modo de borde y filtro de la constante de fetch (o de la instruccion: 0 punto, 1 lineal, 3 = constante)
         uint32_t magF = Bits(w[1], 12, 2), mipF = Bits(w[1], 16, 2);
         g.L("uint4 tm = XTexMode[%u]; bool brd = false;", tf);
@@ -527,8 +544,12 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
         }
     }
     std::string h = kXenosInterfaceHlsl;
+    // Sesion 25 (panoramico): XScreen = escala de la superficie y compresion de la interfaz 2D (solo con GH6_PANORAMICO: a 16:9 el HLSL no cambia)
+    static const bool pano = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
+    if (pano) { size_t q = h.find("uint4 XTexMode[16];"); if (q != std::string::npos) h.insert(h.find('\n', q) + 1, "    float4 XScreen;       // x, y = pixeles de superficie por pixel del juego; z = compresion de la interfaz (0 = no)\n"); }
     if (!isPs)
     {
+        static const bool panoV = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
         h += "XVSOut main(uint vid : SV_VertexID)\n{\n    XVSOut o = (XVSOut)0; float4 r[64]; float ps = 0; bool p0 = false; int a0 = 0; int aL = 0; float3 cubeDir = float3(0, 0, 1); float4 cubeRes = 0; uint vfIndex = vid; uint vfStride = 0;\n";
         h += "    [unroll] for (int i = 0; i < 64; i++) r[i] = float4(0, 0, 0, 0);\n    r[0].x = (float)vid;\n";
         h += g.out;
@@ -541,11 +562,18 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
     if (vte & 16u) p.z = p.z * XVport1.x; if (vte & 32u) p.z += XVport1.y;
     p.xy += XVport1.zw;   // PA_SC_WINDOW_OFFSET (sesion 23)
     float w = ((vte & 0x100u) == 0) ? o.pos.w : 1.0;
+    PANO_UI
     float2 ndc = float2(p.x / (XVte.y * 0.5) - 1.0, 1.0 - p.y / (XVte.z * 0.5));
     o.pos = float4(ndc * w, saturate(p.z) * w, w);
     return o;
 }
 )";
+        {   // Sesion 25 (panoramico): la interfaz 2D (w = 1, coordenadas de pantalla) se comprime hacia el centro para no estirarse con la
+            // superficie; los vertices en los bordes (pases a pantalla completa, fondos) se quedan donde estan.
+            size_t q = h.find("    PANO_UI\n");
+            if (q != std::string::npos)
+                h.replace(q, 12, panoV ? "    if (XScreen.z > 1.0 && abs(w - 1.0) < 1e-5) { float sw = XVte.y, cx = sw * 0.5; if (p.x > 1.0 && p.x < sw - 1.0) p.x = cx + (p.x - cx) / XScreen.z; }\n" : "");
+        }
     }
     else
     {
@@ -564,6 +592,22 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
         h += "    [unroll] for (int k = 0; k < 16; k++) r[k] = i.t[k]; [unroll] for (int k2 = 16; k2 < 64; k2++) r[k2] = float4(0, 0, 0, 0);\n";
         // Sesion 24: PsParamGen (SQ_PROGRAM_CNTL bit 18, SQ_CONTEXT_MISC.param_gen_pos), como Xenia: XY = pixel (entero) con el signo de X
         // = cara trasera; Z, W = 0. Lo usan los shaders que leen texturas por posicion de pixel (restauracion de la escena anterior).
+        // Sesion 25: con resolucion interna, posicion con fraccion (pos / escala - 0.5): la lectura en texeles con centro (+0.5) cae
+        // justo en el pixel correspondiente de la textura grande. Con floor, la profundidad del frame anterior se restauraba en bloques
+        // de 2x2 y al redibujar los personajes la prueba LEQUAL fallaba a filas/columnas alternas (rayado fino en caras y piel).
+        static const bool resScaledPg = getenv("GH6_RESOLUCION") && atoi(getenv("GH6_RESOLUCION")) > 1 && !getenv("GH6_PGENFLOOR");
+        static const bool panoP = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
+        // Sesion 25 (lineas verticales cada 80 pixeles): con pos / escala - 0.5, el entero de la posicion caia en el pixel anterior en
+        // la primera columna de cada pixel del juego; los shaders del juego que calculan baldosas de la EDRAM con la posicion entera
+        // fallaban en cada borde de 80 pixeles. Ahora pp = pos / escala: floor(pp) = pixel del juego, la fraccion = subpixel.
+        if (panoP)
+            h += "    if (XAlpha.z >= 0) { float2 pp = i.pos.xy / max(XScreen.xy, 1.0);\n"
+                 "        r[(int)XAlpha.z] = float4(xFront ? pp.x : -pp.x, pp.y, 0, 0); }\n";
+        else if (resScaledPg)
+            h += "    if (XAlpha.z >= 0) { uint xm = (uint)XAlpha.w; bool pfl = xm >= 64u; xm &= 63u; float2 pq = i.pos.xy / float2(max(xm >> 3, 1u), max(xm & 7u, 1u));\n"
+                 "        float2 pp = pfl ? floor(pq) : pq;\n"
+                 "        r[(int)XAlpha.z] = float4(xFront ? pp.x : -pp.x, pp.y, 0, 0); }\n";
+        else
         h += "    if (XAlpha.z >= 0) { uint xm = (uint)XAlpha.w; float2 pp = floor(i.pos.xy / float2(max(xm >> 3, 1u), max(xm & 7u, 1u)));\n"
              "        r[(int)XAlpha.z] = float4(xFront ? pp.x : -pp.x, pp.y, 0, 0); }\n";
         h += g.out;

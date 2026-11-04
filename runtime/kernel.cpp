@@ -229,7 +229,9 @@ GUEST_IMPL(XGetVideoMode)
 {
     uint32_t p = ctx.r3.u32;
     memset(g_base + p, 0, 0x30);
-    Store32(p + 0x00, 1280); Store32(p + 0x04, 720); Store32(p + 0x08, 0); Store32(p + 0x0C, 1); Store32(p + 0x10, 1);
+    // Sesion 25 (experimento panoramico): GH6_ANCHO = ancho del modo de video que ve el juego
+    static const uint32_t vw = getenv("GH6_ANCHO") ? (uint32_t)atoi(getenv("GH6_ANCHO")) : 1280;
+    Store32(p + 0x00, vw); Store32(p + 0x04, 720); Store32(p + 0x08, 0); Store32(p + 0x0C, 1); Store32(p + 0x10, 1);
     float hz = 60.0f; uint32_t hzBits; memcpy(&hzBits, &hz, 4); Store32(p + 0x14, hzBits);
     Store32(p + 0x18, 1);
 }

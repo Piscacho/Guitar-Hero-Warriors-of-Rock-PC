@@ -125,12 +125,22 @@ void GpuDispatchInterrupt(PPCContext& ctx, uint32_t source, uint32_t cpu)
     if (!cb) return;
     PPCFunc* fn = PPC_LOOKUP_FUNC(g_base, cb);
     if (!fn) return;
+    static const bool irqLog = getenv("GH6_IRQLOG") != nullptr;   // sesion 25 (diagnostico): esperas y duracion de las interrupciones
+    LARGE_INTEGER q0, q1, q2, qf; if (irqLog) QueryPerformanceCounter(&q0);
     std::lock_guard lock(g_irqMutex);
+    if (irqLog) QueryPerformanceCounter(&q1);
     g_base[t_thread.pcr + 0x10C] = (uint8_t)cpu; // KPCR.current_cpu
     uint64_t r1 = ctx.r1.u64, r13 = ctx.r13.u64;
     ctx.r3.u64 = source; ctx.r4.u64 = g_irqUserData.load();
     fn(ctx, g_base);
     ctx.r1.u64 = r1; ctx.r13.u64 = r13;
+    if (irqLog)
+    {
+        QueryPerformanceCounter(&q2); QueryPerformanceFrequency(&qf);
+        double wait = 1000.0 * (q1.QuadPart - q0.QuadPart) / qf.QuadPart, run = 1000.0 * (q2.QuadPart - q1.QuadPart) / qf.QuadPart;
+        static std::atomic<int> n{ 0 };
+        if ((wait > 5 || run > 5) && n++ < 500) LOG("[irq] fuente %u: espera %.1f ms, callback %.1f ms (swap %llu)", source, wait, run, (unsigned long long)g_stats.swaps.load());
+    }
 }
 std::atomic<uint64_t> g_cpWaitUs{ 0 };   // tiempo total del procesador de comandos en WAIT_REG_MEM (para el log de tirones)
 void GpuSetInterruptCallback(uint32_t cb, uint32_t user) { g_irqCallback = cb; g_irqUserData = user; }

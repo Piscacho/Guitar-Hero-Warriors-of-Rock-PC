@@ -882,3 +882,50 @@ puntuación/estrella con bloques blancos.
   vblanks / esa frecuencia. Nuestro mftb iba a 50 MHz -> notas adelantadas +121/+221/+348/+464 ms al 25/50/75/100 % de
   Burnin' for You. Arreglo: ppc_mftb a 49,875 MHz (KeQueryPerformanceFrequency sigue en 50 MHz, como la consola). GH6_TB50=1 = antes.
   Resultado: -5/+4/-4/-3 ms. Herramienta: scratchpad songclock.py (o el calculo por tramos de ctx de pista).
+
+## v1.2.1 publicada (2026-11-02)
+- Commits 9d96e19 + 75c3ce2 (gh6.res); release v1.2.1 (zip SHA-256 44f15c18...); release v1.2.0 borrada (etiqueta conservada).
+- Actualizacion real desde GitHub comprobada: run\updtest v1.0.0 -> v1.2.1 (exe identico al de la release, gh6.ini y partida
+  conservados). Script: scratchpad upd_real_run.ps1 (en realidad apunta a run\updtest).
+
+## Sesion 25 (2026-11-02): resolucion interna, logros, informe de errores
+- Resolucion interna (gpu_d3d12.cpp, Rs() = GH6_RESOLUCION 1..3, resolucion_interna en gh6.ini / launcher Imagen y audio):
+  superficies EDRAM x Rs, viewport/recorte/borrados y posicion de pixel (PsParamGen) x Rs; resolves por GPU guardan la imagen a
+  Rs (ResolvedTex/ResolvedDepth: w,h siguen siendo los del juego, el recurso mide w*Rs); copias derivadas, presentacion,
+  FXAA/CAS y capturas al tamano real. Resolves por CPU y volcados a memoria toman 1 pixel de cada Rs x Rs. Rebanadas de la tabla
+  3D se reducen al tamano original con el shader de resolve (media 2x2). Lecturas en texeles (tx_coord_denorm) de texturas
+  resueltas: XTexMode.z bits 8-11 = Rs (solo se emite en el HLSL con Rs > 1: la cache de shaders a 720p no cambia).
+  Conversion color->profundidad: columnas de 40*RS. Medido: 2x igual de fluido que 1x (5-7 tirones, 60 fps); 3x 57-59 fps
+  (RTX 4080 SUPER). Dos pruebas a 2x salieron lentas por el PC ocupado (repetidas, normales).
+- Panoramico: el juego ignora el ancho de XGetVideoMode (GH6_ANCHO, experimento) y dibuja siempre a 1280x720. La proporcion de la
+  camara es la global 829A2584 (16/9, la escribe sub_823E7B48 desde sub_823DB618; la leen 7 funciones); GH6_ASPECTO=<x> la cambia
+  y la escena 3D se ve con mas campo horizontal. Falta: superficies solo mas anchas (escala X aparte, 32:9 = x2 entero) y separar
+  interfaz 2D / pases de pantalla completa. Pendiente como proyecto aparte.
+- Logros (achievements.cpp): XUserWriteAchievements = sub_822CA650 -> XMsgStartIORequest(0xFB, 0x000B0008, {n, {usuario, id}[]}).
+  Lista (50 logros, 1000 G) del XDBF del ejecutable (82BC0000: 'XACH' + cadenas por idioma, 5 = espanol). Se guardan en
+  <datos>\logros.txt y logros_lista.txt; aviso dorado en pantalla (OverlayToast, tambien en la ruta de presentacion desde memoria);
+  pestana Logros en el launcher. GH6_LOGRO=<id> prueba. Verificado con un desbloqueo real (83 Archivo de himnos, >115 canciones).
+- Informe de errores (main.cpp): SetUnhandledExceptionFilter / terminate / abort -> informes\informe_<fecha>.txt (version,
+  excepcion, sub_ del juego, pila, final de gh6.log y gh6.ini) + .dmp (MiniDumpNormal ~300 KB) y aviso. GH6_FALLO=<s> prueba,
+  GH6_NOINFORME=1 desactiva.
+- Diagnostico: GH6_IRQLOG=1 (esperas/duracion de interrupciones > 5 ms).
+- No hecho: conversion de texturas en segundo plano y liberar VRAM (las texturas nunca se liberan; 128 MB en 9 min de partida).
+- Rayado/bloques en personajes a 2x (captura del usuario): PsParamGen con floor daba la posicion en pixeles de 720p y la restauracion del frame anterior (color y profundidad, lecturas en texeles) salia en bloques de 2x2; al redibujar personajes y luces fallaba LEQUAL a filas alternas. Ahora con Rs > 1 pp = max(pos / escala - 0.5, 0): cada pixel lee su pixel de la textura grande. Prueba A/B en la misma partida (GH6_PGENTEST=1 alterna por parejas de cuadros + DUMP8): bloques 0.018 -> 0, bordes sin escalera. GH6_PGENFLOOR=1 = antes.
+- Panoramico real (Hor+), sesion 25: GH6_PANORAMICO = auto (proporcion del monitor) | 21:9 (64/27) | 32:9 | a:b, panoramico= en gh6.ini y
+  "Proporcion de pantalla" en el launcher. Kx = proporcion / (16/9) (32:9 = 2). Las superficies cuyo ancho en MUESTRAS es 1280 (la escena
+  va en 640 con MSAA 4x) se crean Kx veces mas anchas (EdramRt/DepthRt.kx); viewport igual (el VS mapea pixeles del juego a NDC),
+  recortes/borrados/resolves con la escala X de la superficie; ResolvedTex/ResolvedDepth.sx = ancho del recurso por pixel del juego;
+  lecturas en texeles con escala X/Y (XTexMode.z bits 8-15/16-23, x16); PsParamGen = pos / XScreen.xy - 0.5. Camara: global 829A2584 =
+  proporcion (hilo de vblank). Interfaz 2D (w == 1) comprimida hacia el centro en las superficies anchas salvo vertices en los bordes
+  (pases a pantalla completa). La imagen se presenta con su proporcion (g_presentAspect); las pantallas presentadas desde memoria, 16:9.
+  Con 16:9 el HLSL no cambia. Verificado 32:9 (2560x720 y 5120x1440 a 1440p) y 21:9 (1707x720): escena con mas campo, interfaz
+  centrada, 60 fps; en el lobby se ven dos "ventanas" extra a los lados (fondo 3D detras del pergamino).
+- Panoramico marcado como EXPERIMENTAL en el launcher y gh6.ini a peticion del usuario (algunos angulos de camara y detalles fallan).
+- Lineas verticales cada 80 pixeles del juego a 1440p/4K/panoramico (captura del usuario): las causaba la restauracion de la
+  profundidad (color en la base del buffer de profundidad, franjas exactas de baldosas EDRAM con las mitades de 40 columnas
+  intercambiadas). Con el medio pixel D3D9 en pixeles del juego, a escala s las primeras (s-1)/2 columnas de cada franja quedaban para
+  la franja vecina. En esos draws (color 8888 con base = base de profundidad) el medio pixel va en pixeles de superficie. Medido
+  (columna de costura frente a vecinas): 1.13-1.26 -> 1.03 (16:9 1440p; 0.99 en el suelo iluminado); sin la conversion color->profundidad 1.01.
+  Ademas PsParamGen con escala = pos / escala (sin -0.5): el entero coincide con el pixel del juego; la lectura en texeles centra el
+  subpixel en texturas escaladas y el texel en las normales. GH6_HALFPIXSCALE=1 = medio pixel de superficie en todos los draws (prueba).
+- Tirones de ~150-300 ms a mitad de partida (sesion del usuario a 1440p): justo tras 'biblioteca de PSO guardada' (37-56 MB serializados y escritos en el hilo de la GPU). Ahora el guardado va en otro hilo (g_psoLibMutex protege Load/Store/Serialize): 0 tirones tras los guardados en la prueba. Los otros tirones de esa sesion eran PSO nuevos (primera partida a 1440p con el HLSL nuevo); quedan en la biblioteca para la siguiente.

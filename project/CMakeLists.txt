@@ -15,7 +15,7 @@ target_compile_options(GH6RecompLib PRIVATE ${GH6_PPC_OPT} -fno-strict-aliasing 
 
 add_executable(GH6 ${RECOMP_ROOT}/runtime/main.cpp ${RECOMP_ROOT}/runtime/kernel.cpp ${RECOMP_ROOT}/runtime/import_stubs.cpp
     ${RECOMP_ROOT}/runtime/threads.cpp ${RECOMP_ROOT}/runtime/fs.cpp ${RECOMP_ROOT}/runtime/gpu_stub.cpp ${RECOMP_ROOT}/runtime/diag.cpp
-    ${RECOMP_ROOT}/runtime/gpu_cp.cpp ${RECOMP_ROOT}/runtime/gpu_window.cpp ${RECOMP_ROOT}/runtime/hooks.cpp ${RECOMP_ROOT}/runtime/atomics.cpp ${RECOMP_ROOT}/runtime/xam.cpp ${RECOMP_ROOT}/runtime/audio_wasapi.cpp ${RECOMP_ROOT}/runtime/mic_capture.cpp ${RECOMP_ROOT}/runtime/launcher.cpp ${RECOMP_ROOT}/runtime/launcher_ui.cpp ${RECOMP_ROOT}/runtime/updater.cpp ${RECOMP_ROOT}/runtime/dualsense.cpp ${RECOMP_ROOT}/runtime/gpu_d3d12.cpp
+    ${RECOMP_ROOT}/runtime/gpu_cp.cpp ${RECOMP_ROOT}/runtime/gpu_window.cpp ${RECOMP_ROOT}/runtime/hooks.cpp ${RECOMP_ROOT}/runtime/atomics.cpp ${RECOMP_ROOT}/runtime/xam.cpp ${RECOMP_ROOT}/runtime/audio_wasapi.cpp ${RECOMP_ROOT}/runtime/mic_capture.cpp ${RECOMP_ROOT}/runtime/launcher.cpp ${RECOMP_ROOT}/runtime/launcher_ui.cpp ${RECOMP_ROOT}/runtime/updater.cpp ${RECOMP_ROOT}/runtime/achievements.cpp ${RECOMP_ROOT}/runtime/dualsense.cpp ${RECOMP_ROOT}/runtime/gpu_d3d12.cpp
     ${RECOMP_ROOT}/runtime/gpu_shader.cpp ${RECOMP_ROOT}/runtime/gpu_shadertest.cpp ${RECOMP_ROOT}/runtime/xma.cpp)
 target_include_directories(GH6 PRIVATE ${RECOMP_ROOT}/runtime)
 target_compile_options(GH6 PRIVATE /O2 -fno-strict-aliasing -msse4.1 -Wno-unused-parameter)

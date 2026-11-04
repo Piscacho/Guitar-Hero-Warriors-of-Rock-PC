@@ -111,6 +111,8 @@ LauncherConfig LoadConfig()
             }
             else if (k == "anisotropico" && !v.empty()) _putenv_s("GH6_ANISO", v.c_str());
             else if (k == "nitidez" && !v.empty()) _putenv_s("GH6_NITIDEZ", v.c_str());
+            else if (k == "resolucion_interna" && !v.empty()) _putenv_s("GH6_RESOLUCION", v.c_str());   // 1, 2 o 3 (sesion 25)
+            else if (k == "panoramico" && !v.empty() && v != "16:9") _putenv_s("GH6_PANORAMICO", v.c_str());   // auto, 21:9, 32:9 (sesion 25)
             else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : "fxaa");
             else if (k == "mostrar_fps") _putenv_s("GH6_FPS", v == "1" ? "1" : "0");
             else if (k == "vsync") _putenv_s("GH6_VSYNC", v == "0" ? "0" : "1");

@@ -2,6 +2,8 @@
 #include "runtime.h"
 #include <ppc_recomp_shared.h>
 #include <windows.h>
+#include <shellapi.h>
+#include <dbghelp.h>
 #include <vector>
 #include <fstream>
 #include <string>
@@ -71,6 +73,73 @@ static LONG CALLBACK CrashHandler(EXCEPTION_POINTERS* e)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// Sesion 25: informe de errores. Si el juego se cierra por un fallo, se guarda en informes\ un .txt (version, excepcion, funcion
+// del juego, pila, final de gh6.log y gh6.ini) y un .dmp pequeno (MiniDumpNormal), y se avisa al usuario. GH6_NOINFORME=1 lo desactiva.
+const char* AppVersion();   // updater.cpp
+static void WriteCrashReport(const char* reason, EXCEPTION_POINTERS* e)
+{
+    static LONG once = 0;
+    if (InterlockedExchange(&once, 1) || getenv("GH6_NOINFORME")) return;
+    fflush(stderr);
+    char exe[MAX_PATH]; GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string dir = exe; dir = dir.substr(0, dir.find_last_of("\\/"));
+    std::string out = dir + "\\informes"; CreateDirectoryA(out.c_str(), nullptr);
+    SYSTEMTIME st; GetLocalTime(&st);
+    char name[64]; snprintf(name, sizeof(name), "informe_%04u%02u%02u_%02u%02u%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    std::string base = out + "\\" + name;
+    if (FILE* f = fopen((base + ".txt").c_str(), "wb"))
+    {
+        fprintf(f, "Guitar Hero: Warriors of Rock para PC v%s - informe de error\r\nMotivo: %s\r\n", AppVersion(), reason);
+        if (e)
+        {
+            auto* r = e->ExceptionRecord; uintptr_t mod = (uintptr_t)GetModuleHandleW(nullptr);
+            fprintf(f, "Excepcion 0x%08lX en GH6.exe+0x%llX, acceso a 0x%llX, funcion del juego sub_%08X, hilo %lu\r\nPila:", r->ExceptionCode,
+                    (unsigned long long)((uintptr_t)r->ExceptionAddress - mod), (unsigned long long)(r->NumberParameters > 1 ? r->ExceptionInformation[1] : 0),
+                    GuestFunctionAt((uintptr_t)r->ExceptionAddress), GetCurrentThreadId());
+            CONTEXT c = *e->ContextRecord;
+            for (int fr = 0; fr < 24 && c.Rip; fr++)
+            {
+                fprintf(f, " %llX", (unsigned long long)(c.Rip - mod + 0x140000000ull));
+                DWORD64 imageBase; auto* fe = RtlLookupFunctionEntry(c.Rip, &imageBase, nullptr);
+                if (!fe) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; continue; }
+                void* hd; DWORD64 est; RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, c.Rip, fe, &c, &hd, &est, nullptr);
+            }
+            fprintf(f, "\r\n");
+        }
+        auto copyTail = [&](const char* file, size_t maxBytes, const char* title) {
+            FILE* in = fopen((dir + "\\" + file).c_str(), "rb"); if (!in) return;
+            fseek(in, 0, SEEK_END); long sz = ftell(in); long from = sz > (long)maxBytes ? sz - (long)maxBytes : 0; fseek(in, from, SEEK_SET);
+            fprintf(f, "\r\n===== %s (%s) =====\r\n", title, from ? "final" : "completo");
+            std::vector<char> buf(sz - from); size_t n = fread(buf.data(), 1, buf.size(), in); fwrite(buf.data(), 1, n, f); fclose(in);
+        };
+        copyTail("gh6.ini", 64 << 10, "gh6.ini");
+        copyTail("gh6.log", 256 << 10, "gh6.log");
+        fclose(f);
+    }
+    if (e)
+    {   // volcado pequeno (pilas y modulos; sin la memoria del juego)
+        HMODULE dbg = LoadLibraryW(L"dbghelp.dll");
+        using MDWD = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+        auto mdwd = dbg ? (MDWD)GetProcAddress(dbg, "MiniDumpWriteDump") : nullptr;
+        HANDLE h = mdwd ? CreateFileA((base + ".dmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr) : INVALID_HANDLE_VALUE;
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            MINIDUMP_EXCEPTION_INFORMATION mei{ GetCurrentThreadId(), e, FALSE };   // empaquetada a 4 bytes (dbghelp.h)
+            mdwd(GetCurrentProcess(), GetCurrentProcessId(), h, MiniDumpNormal, &mei, nullptr, nullptr);
+            CloseHandle(h);
+        }
+    }
+    LOG("[crash] informe guardado en %s.txt", base.c_str()); fflush(stderr);
+    if (!getenv("GH6_DEVMODE"))
+    {
+        std::wstring msg = L"El juego se ha cerrado por un error.\n\nSe ha guardado un informe en la carpeta \"informes\" (" + std::wstring(name, name + strlen(name)) +
+                           L".txt). Si quieres ayudar a arreglarlo, envía ese archivo junto con lo que estabas haciendo.\n\n¿Abrir la carpeta?";
+        if (MessageBoxW(nullptr, msg.c_str(), L"Guitar Hero: Warriors of Rock", MB_YESNO | MB_ICONERROR | MB_TOPMOST) == IDYES)
+            ShellExecuteA(nullptr, "open", out.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+static LONG WINAPI LastChanceFilter(EXCEPTION_POINTERS* e) { WriteCrashReport("fallo sin capturar", e); return EXCEPTION_CONTINUE_SEARCH; }
+
 int RunShaderTest(const char* dir);
 // Reserva los 4 GB de invitado con 0xC0000000 como espejo de 0xA0000000 (vistas de una seccion de 512 MB sobre placeholders).
 static uint8_t* ReserveGuestMemory()
@@ -106,9 +175,12 @@ int main(int argc, char** argv)
 {
     if (const char* st = getenv("GH6_SHADERTEST")) return RunShaderTest(st);
     AddVectoredExceptionHandler(1, CrashHandler);
+    SetUnhandledExceptionFilter(LastChanceFilter);   // sesion 25: informe de errores
+    if (const char* ft = getenv("GH6_FALLO"))   // prueba del informe: fallo provocado a los N segundos
+    { int secs = atoi(ft); CreateThread(nullptr, 0, [](LPVOID p) -> DWORD { Sleep((DWORD)(uintptr_t)p * 1000); *(volatile int*)nullptr = 1; return 0; }, (LPVOID)(uintptr_t)secs, 0, nullptr); }
     // Sesion 24: cierres silenciosos (terminate / abort / salida del proceso) quedan en el log
-    std::set_terminate([] { LOG("[crash] std::terminate (excepcion de C++ sin capturar)"); fflush(stderr); abort(); });
-    signal(SIGABRT, [](int) { LOG("[crash] abort()"); fflush(stderr); });
+    std::set_terminate([] { LOG("[crash] std::terminate (excepcion de C++ sin capturar)"); fflush(stderr); WriteCrashReport("std::terminate (excepcion de C++ sin capturar)", nullptr); abort(); });
+    signal(SIGABRT, [](int) { LOG("[crash] abort()"); fflush(stderr); WriteCrashReport("abort()", nullptr); });
     atexit([] { LOG("[salida] el proceso termina (atexit)"); fflush(stderr); });
     // Modo desarrollo: GH6.exe basefile.bin default.xex [iso] [datos]. Modo usuario (sin argumentos): gh6.ini + ISO (sesion 23).
     bool devMode = argc > 2;

@@ -175,12 +175,18 @@ enum
     ID_TAB0 = 100, ID_PLAY = 200, ID_SAVE, ID_EXIT, ID_SHOWLAUNCHER, ID_SAVED,
     ID_ISO = 300, ID_ISO_BROWSE, ID_DLC, ID_DLC_BROWSE, ID_DLCCOUNT, ID_SKIPINTRO, ID_SAVEINFO, ID_SAVEOPEN, ID_SAVERESET, ID_SAVERESTORE,
     ID_UPDINFO, ID_UPDCHECK, ID_UPDAUTO,
-    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT, ID_AA, ID_ANISO, ID_SHARP, ID_FPS,
+    ID_FULLSCREEN = 400, ID_WINSIZE, ID_SCALE, ID_VSYNC, ID_MBLUR, ID_GRAIN, ID_AUDIOLAT, ID_AA, ID_ANISO, ID_SHARP, ID_FPS, ID_RES, ID_PANO,
     ID_INST0 = 500, ID_PAD0 = 510, ID_STATUS0 = 520, ID_KBD = 530, ID_PS, ID_PADMODE, ID_DIAG, ID_MAPSET, ID_MAPPLAYER, ID_ASSIGN, ID_ADD, ID_RESET, ID_MAPLIST, ID_TESTPLAYER, ID_TESTPANEL,
     ID_MIC_ON = 600, ID_MIC_DEV, ID_MIC_GAIN, ID_MIC_GAINLBL, ID_MIC_METER,
+    ID_ACHINFO = 700, ID_ACHLIST,
 };
-const wchar_t* kWinSizes[] = { L"1280 x 720", L"1600 x 900", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160" };
-const char* kWinSizesIni[] = { "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160" };
+constexpr int kTabs = 6;   // sesion 25: + Logros (pagina 5, dibujada encima de Ayuda en la barra lateral)
+struct AchRow { std::wstring name, desc, howto, date; int gs = 0; bool unlocked = false; };
+// Sesion 25: + tamanos panoramicos (21:9 y 32:9)
+const wchar_t* kWinSizes[] = { L"1280 x 720", L"1600 x 900", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160",
+                               L"2560 x 1080 (21:9)", L"3440 x 1440 (21:9)", L"3840 x 1080 (32:9)", L"5120 x 1440 (32:9)" };
+const char* kWinSizesIni[] = { "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160", "2560x1080", "3440x1440", "3840x1080", "5120x1440" };
+constexpr int kNumWinSizes = 9;
 const char* kInstIni[] = { "guitarra", "bateria", "voz" };
 
 struct Ui
@@ -188,7 +194,8 @@ struct Ui
     HWND wnd = nullptr; HINSTANCE inst = nullptr; int dpi = 96;
     HFONT font = nullptr, fontBold = nullptr, fontTitle = nullptr, fontSub = nullptr, fontTab = nullptr, fontIcon = nullptr, fontSmall = nullptr;
     HBRUSH brBg = nullptr, brInput = nullptr, brSide = nullptr;
-    int tab = 0; std::vector<HWND> pages[5];
+    int tab = 0; std::vector<HWND> pages[kTabs];
+    std::vector<AchRow> achs;
     std::map<HWND, bool> toggles; std::set<HWND> dimLabels;
     IniDoc ini;
     int mapSet = 0, mapPlayer = 0;   // mapPlayer: 0 = todos (valor comun), 1-4 = solo ese jugador
@@ -463,6 +470,24 @@ void DrawItem(DRAWITEMSTRUCT* d)
         SelectObject(mem, ob); DeleteObject(bm); DeleteDC(mem);
         return;
     }
+    if (d->CtlType == ODT_LISTBOX && d->CtlID == ID_ACHLIST)
+    {
+        if ((int)d->itemID < 0 || d->itemID >= g.achs.size()) return;
+        const AchRow& a = g.achs[d->itemID];
+        bool sel = (d->itemState & ODS_SELECTED) != 0;
+        FillR(dc, rc, sel ? kSel : kInput);
+        RECT sep{ rc.left, rc.bottom - 1, rc.right, rc.bottom }; FillR(dc, sep, kBg);
+        RECT ic{ rc.left + S(6), rc.top, rc.left + S(40), rc.bottom };
+        Text(dc, L"\uE734", ic, a.unlocked ? RGB(255, 200, 60) : kLine, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT t1{ rc.left + S(44), rc.top + S(3), rc.right - S(150), rc.top + S(23) };
+        Text(dc, a.name.c_str(), t1, a.unlocked ? kText : kDim, a.unlocked ? g.fontBold : g.font, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT t2{ rc.left + S(44), rc.top + S(23), rc.right - S(10), rc.bottom - S(3) };
+        Text(dc, (a.unlocked ? a.desc : a.howto.empty() ? a.desc : a.howto).c_str(), t2, kDim, g.fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT t3{ rc.right - S(150), rc.top + S(3), rc.right - S(10), rc.top + S(23) };
+        std::wstring right = std::to_wstring(a.gs) + L" G" + (a.unlocked ? L"  ·  " + a.date.substr(0, 10) : L"");
+        Text(dc, right.c_str(), t3, a.unlocked ? RGB(255, 200, 60) : kDim, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
     if (d->CtlType == ODT_LISTBOX)
     {
         if ((int)d->itemID < 0) return;
@@ -486,12 +511,12 @@ void DrawItem(DRAWITEMSTRUCT* d)
     HWND h = d->hwndItem;
     wchar_t t[128]; GetWindowTextW(h, t, 128);
     bool pressed = (d->itemState & ODS_SELECTED) != 0, focus = (d->itemState & ODS_FOCUS) != 0;
-    if (d->CtlID >= ID_TAB0 && d->CtlID < ID_TAB0 + 5)
+    if (d->CtlID >= ID_TAB0 && d->CtlID < ID_TAB0 + kTabs)
     {
         int i = d->CtlID - ID_TAB0; bool sel = i == g.tab;
         FillR(dc, rc, sel ? kSel : kSide);
         if (sel) { RECT bar{ rc.left, rc.top + S(8), rc.left + S(4), rc.bottom - S(8) }; FillR(dc, bar, kAccent); }
-        static const wchar_t* icons[5] = { L"", L"", L"", L"", L"" };
+        static const wchar_t* icons[kTabs] = { L"", L"", L"", L"", L"", L"" };
         RECT ir{ rc.left + S(18), rc.top, rc.left + S(46), rc.bottom };
         Text(dc, icons[i], ir, sel ? kAccent2 : kDim, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         RECT tr{ rc.left + S(52), rc.top, rc.right, rc.bottom };
@@ -542,11 +567,13 @@ void PaintMain(HDC dc)
     RECT fl{ 0, foot, rc.right, foot + 1 }; FillR(dc, fl, kLine);
     
 }
+void LoadAchievements();
 void ShowTab(int t)
 {
     g.tab = t;
-    for (int p = 0; p < 5; p++) for (HWND h : g.pages[p]) ShowWindow(h, p == t ? SW_SHOW : SW_HIDE);
-    for (int i = 0; i < 5; i++) InvalidateRect(Item(ID_TAB0 + i), nullptr, TRUE);
+    for (int p = 0; p < kTabs; p++) for (HWND h : g.pages[p]) ShowWindow(h, p == t ? SW_SHOW : SW_HIDE);
+    for (int i = 0; i < kTabs; i++) InvalidateRect(Item(ID_TAB0 + i), nullptr, TRUE);
+    if (t == 5) LoadAchievements();
     if (t != 3) { g.meter.Stop(); g.meterOn = false; }
 }
 void StartMeter()
@@ -607,8 +634,12 @@ void BuildUi()
     IniDoc& ini = g.ini;
     auto flag = [&](const char* k, bool def) { std::string v = ini.Get(k, def ? "1" : "0"); return v != "0"; };
     // Barra lateral y pie
-    const wchar_t* tabs[5] = { L"Juego", L"Imagen y audio", L"Controles", L"Micrófono", L"Ayuda" };
-    for (int i = 0; i < 5; i++) Button(-1, tabs[i], 0, 96 + i * 52, 180, 48, ID_TAB0 + i);
+    const wchar_t* tabs[kTabs] = { L"Juego", L"Imagen y audio", L"Controles", L"Micrófono", L"Ayuda", L"Logros" };
+    for (int i = 0; i < kTabs; i++) { int pos = i == 5 ? 4 : i == 4 ? 5 : i; Button(-1, tabs[i], 0, 96 + pos * 52, 180, 48, ID_TAB0 + i); }
+    // Logros (sesion 25): la lista la escribe el juego en la carpeta de partidas (logros_lista.txt)
+    Label(5, L"Logros", 204, 98, 200, 22, 0, false, g.fontBold);
+    Label(5, L"", 300, 98, 560, 22, ID_ACHINFO, true);
+    Make(5, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT, 204, 128, 656, 384, ID_ACHLIST);
     Toggle(-1, L"Mostrar este launcher al iniciar", 22, 534, 300, ID_SHOWLAUNCHER, flag("mostrar_launcher", true));
     Label(-1, L"", 330, 538, 200, 22, ID_SAVED, true);
     Button(-1, L"Guardar", 540, 528, 100, 40, ID_SAVE);
@@ -651,12 +682,20 @@ void BuildUi()
           204, 404, 660, 92, 0, true);
     // Graficos
     int ws = 0; std::string v = ini.Get("ventana", "1280x720");
-    for (int i = 0; i < 5; i++) if (v == kWinSizesIni[i]) ws = i;
+    for (int i = 0; i < kNumWinSizes; i++) if (v == kWinSizesIni[i]) ws = i;
     Toggle(1, L"Pantalla completa al arrancar", 204, 94, 420, ID_FULLSCREEN, flag("pantalla_completa", false));
     Label(1, L"Tamaño de la ventana", 204, 130, 190, 22);
-    Combo(1, 400, 126, 200, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4] }, ws);
+    Combo(1, 400, 126, 200, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4], kWinSizes[5], kWinSizes[6], kWinSizes[7], kWinSizes[8] }, ws);
     Label(1, L"Escalado de imagen", 204, 164, 190, 22);
     Combo(1, 400, 160, 200, ID_SCALE, { L"Nítido (Catmull-Rom)", L"Suave (bilineal)" }, ini.Get("escalado") == "bilineal" ? 1 : 0);
+    {   // Sesion 25: resolucion interna (el juego se dibuja a 720p en la consola)
+        std::string rs = ini.Get("resolucion_interna", "1");
+        Label(1, L"Resolución interna", 624, 130, 240, 22);
+        Combo(1, 624, 160, 240, ID_RES, { L"720p (como la consola)", L"1440p (2x, recomendada)", L"2160p / 4K (3x, PC potente)" }, rs == "2" ? 1 : rs == "3" ? 2 : 0);
+        std::string pn = ini.Get("panoramico", "16:9");
+        Label(1, L"Proporción (experimental)", 640, 330, 224, 22);
+        Combo(1, 640, 356, 224, ID_PANO, { L"16:9 (como la consola)", L"Panorámica del monitor (exp.)", L"21:9 (experimental)", L"32:9 (experimental)" }, pn == "auto" ? 1 : pn == "21:9" ? 2 : pn == "32:9" ? 3 : 0);
+    }
     Label(1, L"Suavizado de bordes", 204, 198, 190, 22);
     Combo(1, 400, 194, 260, ID_AA, { L"FXAA (quita los dientes de sierra)", L"Desactivado" }, ini.Get("suavizado", "fxaa") == "no" ? 1 : 0);
     std::string an = ini.Get("anisotropico", "16");
@@ -750,7 +789,7 @@ bool Collect(bool requireIso)
     ini.Set("actualizar_al_abrir", Toggled(ID_UPDAUTO) ? "1" : "0");
     ini.Set("mostrar_launcher", Toggled(ID_SHOWLAUNCHER) ? "1" : "0");
     ini.Set("pantalla_completa", Toggled(ID_FULLSCREEN) ? "1" : "0");
-    ini.Set("ventana", kWinSizesIni[std::max(0, Sel(ID_WINSIZE))]);
+    ini.Set("ventana", kWinSizesIni[std::clamp(Sel(ID_WINSIZE), 0, kNumWinSizes - 1)]);
     ini.Set("escalado", Sel(ID_SCALE) == 1 ? "bilineal" : "catmull-rom");
     ini.Set("vsync", Toggled(ID_VSYNC) ? "1" : "0");
     ini.Set("mostrar_fps", Toggled(ID_FPS) ? "1" : "0");
@@ -759,6 +798,8 @@ bool Collect(bool requireIso)
     ini.Set("suavizado", Sel(ID_AA) == 1 ? "no" : "fxaa");
     { static const char* an[] = { "16", "8", "4", "1" }; ini.Set("anisotropico", an[std::clamp(Sel(ID_ANISO), 0, 3)]); }
     { static const char* ni[] = { "0", "0.25", "0.4", "0.7" }; ini.Set("nitidez", ni[std::clamp(Sel(ID_SHARP), 0, 3)]); }
+    { static const char* rr[] = { "1", "2", "3" }; ini.Set("resolucion_interna", rr[std::clamp(Sel(ID_RES), 0, 2)]); }
+    { static const char* pp[] = { "16:9", "auto", "21:9", "32:9" }; ini.Set("panoramico", pp[std::clamp(Sel(ID_PANO), 0, 3)]); }
     { static const char* lat[] = { "baja", "normal", "segura" }; ini.Set("latencia_audio", lat[std::clamp(Sel(ID_AUDIOLAT), 0, 2)]); }
     for (int p = 0; p < 4; p++)
     {
@@ -843,6 +884,35 @@ fsx::path DataDir()
     std::string d = g.ini.Get("datos", "userdata");
     fsx::path p = fsx::path(W(d));
     return p.is_absolute() ? p : fsx::path(W(ExeDir())) / p;
+}
+// Sesion 25: logros_lista.txt (id|puntos|fecha o 0|nombre|descripcion|como conseguirlo, UTF-8), escrita por el juego
+void LoadAchievements()
+{
+    g.achs.clear();
+    if (FILE* f = _wfopen((DataDir() / L"logros_lista.txt").c_str(), L"rb"))
+    {
+        char line[2048];
+        while (fgets(line, sizeof(line), f))
+        {
+            std::vector<std::string> c; std::string cur;
+            for (char* q = line; *q && *q != '\r' && *q != '\n'; q++) { if (*q == '|') { c.push_back(cur); cur.clear(); } else cur += *q; }
+            c.push_back(cur);
+            if (c.size() < 6) continue;
+            auto u8 = [](const std::string& x) { std::wstring w(x.size() + 1, L' '); int n = MultiByteToWideChar(CP_UTF8, 0, x.c_str(), (int)x.size(), &w[0], (int)w.size()); w.resize(n > 0 ? n : 0); return w; };
+            AchRow a; a.gs = atoi(c[1].c_str()); a.unlocked = c[2] != "0"; a.date = u8(a.unlocked ? c[2] : ""); a.name = u8(c[3]); a.desc = u8(c[4]); a.howto = u8(c[5]);
+            g.achs.push_back(a);
+        }
+        fclose(f);
+    }
+    std::stable_sort(g.achs.begin(), g.achs.end(), [](const AchRow& x, const AchRow& y) { return x.unlocked > y.unlocked; });
+    int n = 0, pts = 0, tot = 0; for (auto& a : g.achs) { tot += a.gs; if (a.unlocked) { n++; pts += a.gs; } }
+    wchar_t info[160];
+    if (g.achs.empty()) swprintf(info, 160, L"Juega una vez para ver la lista de logros.");
+    else swprintf(info, 160, L"%d de %zu desbloqueados  ·  %d de %d puntos", n, g.achs.size(), pts, tot);
+    SetWindowTextW(Item(ID_ACHINFO), info);
+    HWND l = Item(ID_ACHLIST);
+    SendMessageW(l, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < g.achs.size(); i++) SendMessageW(l, LB_ADDSTRING, 0, (LPARAM)i);
 }
 // Las partidas son el contenido de tipo 00000001 (savegame); el DLC importado (00000002, 00009000) no se toca
 std::vector<fsx::path> SaveEntries()
@@ -969,7 +1039,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_PAINT: { PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); PaintMain(dc); EndPaint(h, &ps); return 0; }
     case WM_ERASEBKGND: return 1;
     case WM_DRAWITEM: DrawItem((DRAWITEMSTRUCT*)l); return TRUE;
-    case WM_MEASUREITEM: ((MEASUREITEMSTRUCT*)l)->itemHeight = S(24); return TRUE;
+    case WM_MEASUREITEM: ((MEASUREITEMSTRUCT*)l)->itemHeight = ((MEASUREITEMSTRUCT*)l)->CtlID == ID_ACHLIST ? S(46) : S(24); return TRUE;
     case WM_CTLCOLORSTATIC:
     {
         HDC dc = (HDC)w; SetTextColor(dc, g.dimLabels.count((HWND)l) ? kDim : kText); SetBkColor(dc, kBg);
@@ -1015,7 +1085,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (id == ID_MIC_ON) StartMeter();
             return 0;
         }
-        if (id >= ID_TAB0 && id < ID_TAB0 + 5 && code == BN_CLICKED) { ShowTab(id - ID_TAB0); return 0; }
+        if (id >= ID_TAB0 && id < ID_TAB0 + kTabs && code == BN_CLICKED) { ShowTab(id - ID_TAB0); return 0; }
         switch (id)
         {
         case ID_PLAY: if (Collect(true)) { g.ini.Save(ExeDir() + "\\gh6.ini"); g.result = true; DestroyWindow(h); } return 0;

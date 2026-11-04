@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <windows.h>
+float GH6PanoAspect();   // gpu_d3d12.cpp (sesion 25): proporcion panoramica, 0 = 16:9
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
@@ -71,6 +72,11 @@ void StartGpuThreads()
                 }
             }
             g_vblankCount++;
+            {   // Sesion 25 (experimento panoramico): GH6_ASPECTO = proporcion de la camara del juego (global 829A2584, 16/9 por defecto)
+
+                static const float asp = getenv("GH6_ASPECTO") ? (float)atof(getenv("GH6_ASPECTO")) : GH6PanoAspect();
+                if (asp > 0) { uint32_t want; memcpy(&want, &asp, 4); if (Load32(0x829A2584) != want && Load32(0x829A2584) != 0) Store32(0x829A2584, want); }
+            }
             Store32(kD1ModeVblankStatus, 1);
             GpuDispatchInterrupt(*ctx, 0, 2);
             {   // GH6_VBLANKLOG=<dir hex>: cada 5 s, cuanto avanzo ese contador de 64 bits del juego por vblank (diagnostico)
@@ -109,8 +115,9 @@ GUEST_IMPL(VdGetCurrentDisplayInformation)
 {
     uint32_t p = ctx.r3.u32;
     memset(g_base + p, 0, 0x58);
-    Store16(p + 0x00, 1280); Store16(p + 0x02, 720);   // front buffer
-    Store16(p + 0x50, 1280); Store16(p + 0x52, 720);   // display
+    static const uint16_t vw = getenv("GH6_ANCHO") ? (uint16_t)atoi(getenv("GH6_ANCHO")) : 1280;   // sesion 25 (experimento)
+    Store16(p + 0x00, vw); Store16(p + 0x02, 720);   // front buffer
+    Store16(p + 0x50, vw); Store16(p + 0x52, 720);   // display
     float hz = 60.0f; uint32_t b; memcpy(&b, &hz, 4); Store32(p + 0x54, b);
 }
 // VdInitializeRingBuffer(base_ptr, size_log2)

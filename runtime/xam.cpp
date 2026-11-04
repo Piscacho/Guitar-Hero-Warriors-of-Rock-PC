@@ -1419,10 +1419,22 @@ GUEST_IMPL(XamEnumerate)
 
 // ---- mensajes XMsg ----
 // Sesion 24: registro de los mensajes (app 0xFB = xlivebase: logros, perfil, sesiones) para estudiar los logros
+void AchievementsInit();               // achievements.cpp (sesion 25)
+void AchievementUnlock(uint32_t id);
 static void LogXMsg(const char* fn, uint32_t app, uint32_t msg, uint32_t buf, uint32_t size)
 {
     static int n = 0;
     if (n++ < 60) LOG("[xmsg] %s(app 0x%X, mensaje 0x%08X, buffer %08X, %u bytes)", fn, app, msg, buf, size);
+    // Sesion 25: XGI (0xFB). 0x000B0008 = XUserWriteAchievements: buffer {numero, puntero a {indice de usuario, id de logro}[]}
+    if (app == 0xFB)
+    {
+        AchievementsInit();
+        if (msg == 0x000B0008 && buf && size >= 8)
+        {
+            uint32_t count = Load32(buf), arr = Load32(buf + 4);
+            for (uint32_t i = 0; i < count && i < 64 && arr; i++) AchievementUnlock(Load32(arr + i * 8 + 4));
+        }
+    }
 }
 GUEST_IMPL(XMsgInProcessCall) { LogXMsg("XMsgInProcessCall", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32); ctx.r3.u64 = X_ERROR_SUCCESS; }
 // XMsgStartIORequestEx(app, message, overlapped, buffer, buffer_size, unk)

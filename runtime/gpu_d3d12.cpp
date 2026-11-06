@@ -103,7 +103,7 @@ uint64_t g_frameDraws = 0;
 uint64_t g_curPsHash = 0;   // PS del draw en curso (diagnostico)
 UINT g_descCursor = 0;
 uint64_t g_frameCounter = 0;
-ComPtr<ID3DBlob> g_rectGs;
+ComPtr<ID3DBlob> g_rectGs, g_rectGsPano, g_panoGs;   // sesion 25: GS del panoramico
 // ---- EDRAM (sesion 9): un RT por (base, pitch) ----
 // Sesion 21: cada superficie tiene el formato de RB_COLOR_INFO (bits 16-19), no siempre BGRA8
 struct EdramRt
@@ -371,6 +371,64 @@ void main(triangle XVSOut v[3], inout TriangleStream<XVSOut> s)
 }
 )";
 
+// Sesion 25 (panoramico): la interfaz 2D se decide por triangulo. Un triangulo ortografico (w = 1) que cruza la pantalla de borde a
+// borde es un efecto de pantalla completa (fundidos, fondos) y se estira con la superficie; si toca solo un borde (tiras de la vineta,
+// elementos anclados) se queda pegado a ese borde sin estirarse; si no, es una pieza de la interfaz y se comprime hacia el centro
+// (todas las piezas igual, como en 16:9). XPanoMode = 2: el draw lee la escena (resolve) -> nunca se toca.
+const char* kPanoGsCommon = R"(
+cbuffer XPano : register(b1) { float XPanoK; float XPanoMode; };
+// 0 = no tocar; 1 = comprimir al centro; 2 = pegado al borde izquierdo; 3 = pegado al derecho (sin estirarse)
+int PanoMode(float4 a, float4 b, float4 c)
+{
+    if (XPanoK <= 1.0 || XPanoMode > 1.5) return 0;
+    if (abs(a.w - 1.0) > 1e-5 || abs(b.w - 1.0) > 1e-5 || abs(c.w - 1.0) > 1e-5) return 0;
+    float xmin = min(min(a.x, b.x), c.x), xmax = max(max(a.x, b.x), c.x);
+    bool l = xmin <= -0.99, r = xmax >= 0.99;
+    if (l && r) return 0;
+    // de un borde justo hasta el centro: mitad de un efecto de pantalla completa (la vineta va en dos mitades) -> se estira
+    if ((l && abs(xmax) <= 0.02) || (r && abs(xmin) <= 0.02)) return 0;
+    // tira estrecha pegada a un borde (tiras de la vineta, elementos anclados) -> pegada a ese borde sin estirarse.
+    // Las piezas anchas (arte del menu principal y de la pantalla de guardado, partido en trozos grandes) se comprimen
+    // al centro todas igual para que encajen como en 16:9.
+    if ((l || r) && xmax - xmin < 0.6) return l ? 2 : 3;
+    return 1;
+}
+float PanoX(float x, int m) { return m == 1 ? x / XPanoK : m == 2 ? -1.0 + (x + 1.0) / XPanoK : m == 3 ? 1.0 - (1.0 - x) / XPanoK : x; }
+// salida con recorte: lo que en 16:9 caia fuera de la pantalla (trozos del arte del menu) tambien queda fuera al comprimir
+struct XPanoOut { float4 pos : SV_Position; float4 t[16] : TEXCOORD0; float2 clip : SV_ClipDistance0; };
+XPanoOut PanoOut(XVSOut v, int m)
+{
+    XPanoOut o; o.pos = v.pos; o.t = v.t;
+    o.pos.x = PanoX(v.pos.x, m);
+    o.clip = m == 0 ? float2(1.0, 1.0) : float2(o.pos.x - PanoX(-1.0, m), PanoX(1.0, m) - o.pos.x);   // m != 0 -> w = 1
+    return o;
+}
+)";
+const char* kPanoGsHlsl = R"(
+[maxvertexcount(3)]
+void main(triangle XVSOut v[3], inout TriangleStream<XPanoOut> s)
+{
+    int m = PanoMode(v[0].pos, v[1].pos, v[2].pos);
+    [unroll] for (int i = 0; i < 3; i++) s.Append(PanoOut(v[i], m));
+}
+)";
+const char* kRectGsPanoHlsl = R"(
+[maxvertexcount(4)]
+void main(triangle XVSOut v[3], inout TriangleStream<XPanoOut> s)
+{
+    float2 p0 = v[0].pos.xy / v[0].pos.w, p1 = v[1].pos.xy / v[1].pos.w, p2 = v[2].pos.xy / v[2].pos.w;
+    float d01 = dot(p0 - p1, p0 - p1), d12 = dot(p1 - p2, p1 - p2), d02 = dot(p0 - p2, p0 - p2);
+    uint c = 0, a = 1, b = 2;
+    if (d02 > d12 && d02 >= d01) { c = 1; a = 0; b = 2; }
+    else if (d01 > d12 && d01 > d02) { c = 2; a = 0; b = 1; }
+    XVSOut d;
+    d.pos = v[a].pos + v[b].pos - v[c].pos;
+    [unroll] for (int i = 0; i < 16; i++) d.t[i] = v[a].t[i] + v[b].t[i] - v[c].t[i];
+    int m = PanoMode(v[0].pos, v[1].pos, v[2].pos);
+    s.Append(PanoOut(v[c], m)); s.Append(PanoOut(v[a], m)); s.Append(PanoOut(v[b], m)); s.Append(PanoOut(d, m));
+}
+)";
+
 bool Check(HRESULT hr, const char* what)
 {
     if (SUCCEEDED(hr)) return true;
@@ -493,7 +551,11 @@ static void InitPsoLibrary()
     if (FILE* f = fopen("shadercache/pso.lib", "rb"))
     {
         fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-        if (n > 0 && n < (512l << 20)) { g_psoLibData.resize(n); if (fread(g_psoLibData.data(), 1, n, f) != (size_t)n) g_psoLibData.clear(); }
+        // Sesion 25: la biblioteca no borra PSO viejos (de traductores o ajustes anteriores). Si pasa de GH6_PSOMB (por defecto 192 MB)
+        // se empieza una nueva: los PSO en uso se vuelven a crear una vez y la biblioteca queda solo con lo que se usa.
+        static const long capMb = getenv("GH6_PSOMB") ? atol(getenv("GH6_PSOMB")) : 192;
+        if (n > (capMb << 20)) LOG("[d3d12] biblioteca de PSO de %ld MB (limite %ld MB): se empieza una nueva", n >> 20, capMb);
+        else if (n > 0 && n < (512l << 20)) { g_psoLibData.resize(n); if (fread(g_psoLibData.data(), 1, n, f) != (size_t)n) g_psoLibData.clear(); }
         fclose(f);
     }
     HRESULT hr = E_FAIL;
@@ -532,7 +594,7 @@ static HRESULT CreatePsoCached(D3D12_GRAPHICS_PIPELINE_STATE_DESC& pd, uint64_t 
 {
     if (!g_psoLib) return g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
     uint64_t h = Fnv64(&key, sizeof(key));
-    { UINT salt = AnisoLevel(); h = Fnv64(&salt, sizeof(salt), h); }   // la firma raiz cambia con el anisotropico
+    { UINT salt = AnisoLevel() + (Pano() ? 1000u : 0u); h = Fnv64(&salt, sizeof(salt), h); }   // firma raiz distinta con panoramico   // la firma raiz cambia con el anisotropico
     h = Fnv64(pd.VS.pShaderBytecode, pd.VS.BytecodeLength, h); h = Fnv64(pd.PS.pShaderBytecode, pd.PS.BytecodeLength, h);
     if (pd.GS.pShaderBytecode) h = Fnv64(pd.GS.pShaderBytecode, pd.GS.BytecodeLength, h);
     wchar_t name[24]; swprintf(name, 24, L"%016llX", (unsigned long long)h);
@@ -806,13 +868,25 @@ bool Init(HWND hwnd)
     // los gradientes reales; en pasadas a pantalla completa (gradientes iguales) da lo mismo que el trilineal.
     if (AnisoLevel() > 1) { ds[0].Filter = D3D12_FILTER_ANISOTROPIC; ds[0].MaxAnisotropy = AnisoLevel(); }
     LOG("[d3d12] filtrado de texturas: %s (x%u)", AnisoLevel() > 1 ? "anisotropico" : "trilineal", AnisoLevel());
-    g_drawRootSig = MakeRootSig({ 4, dp, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
+    if (Pano())
+    {   // sesion 25: constantes del GS del panoramico (escala y modo de la interfaz)
+        D3D12_ROOT_PARAMETER dp5[5]; for (int i = 0; i < 4; i++) dp5[i] = dp[i];
+        dp5[4] = {}; dp5[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; dp5[4].Constants = { 1, 0, 2 }; dp5[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+        g_drawRootSig = MakeRootSig({ 5, dp5, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
+    }
+    else g_drawRootSig = MakeRootSig({ 4, dp, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
     if (!g_blitRootSig || !g_drawRootSig) { g_failed = true; return false; }
 
     // GH6_UPSCALE=bilineal: escalado bilineal (antes); por defecto Catmull-Rom
     static const bool bilinear = getenv("GH6_UPSCALE") && !strcmp(getenv("GH6_UPSCALE"), "bilineal");
     auto vs = Compile(kBlitHlsl, "vs_main", "vs_5_0", "blit"), ps = Compile(kBlitHlsl, bilinear ? "ps_main" : "ps_cubic", "ps_5_0", "blit");
     g_rectGs = Compile(std::string(kXenosInterfaceHlsl) + kRectGsHlsl, "main", "gs_5_0", "rectlist_gs");
+    if (Pano())
+    {
+        g_rectGsPano = Compile(std::string(kXenosInterfaceHlsl) + kPanoGsCommon + kRectGsPanoHlsl, "main", "gs_5_0", "rectlist_gs_pano");
+        g_panoGs = Compile(std::string(kXenosInterfaceHlsl) + kPanoGsCommon + kPanoGsHlsl, "main", "gs_5_0", "pano_gs");
+        if (!g_rectGsPano || !g_panoGs) LOG("[d3d12] panoramico: no se compilaron los GS de la interfaz");
+    }
     if (!vs || !ps) { g_failed = true; return false; }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
     pd.pRootSignature = g_blitRootSig.Get();
@@ -1003,6 +1077,11 @@ UINT64 RingAlloc(UINT64 size, UINT64 align = 256)
     return o;
 }
 
+// Sesion 25: reparto de los montones de texturas (ver CreateTextureResource)
+struct TexAlloc { int heap = -1; UINT64 off = 0, size = 0; };
+std::vector<TexAlloc> g_texFree;                       // huecos libres (ya sin uso en la GPU)
+std::vector<TexAlloc> g_texFreeDeferred[kFrames];      // huecos que se liberan cuando la GPU acabe ese frame
+void TexEvict();
 void OpenFrame()
 {
     if (g_frameOpen) return;
@@ -1014,6 +1093,9 @@ void OpenFrame()
     g_ringOffset = 0;
     g_vbCache.clear();
     g_deferredRelease[g_fi].clear();   // la GPU ya termino el frame que uso este indice
+    for (auto& a : g_texFreeDeferred[g_fi]) g_texFree.push_back(a);
+    g_texFreeDeferred[g_fi].clear();
+    TexEvict();
     static bool whiteDone = false;
     if (!whiteDone)
     {
@@ -1101,10 +1183,13 @@ uint64_t g_skipped[16] = {};
 // Sesion 24 (tirones en menus): las texturas 2D se crean dentro de montones grandes ya reservados (CreatePlacedResource) en lugar de
 // un recurso propio cada una (CreateCommittedResource ~0.3 ms: al recorrer la lista de canciones se crean 50-120 por cuadro).
 // Las texturas nunca se liberan (igual que antes con los recursos propios), asi que basta un reparto lineal. GH6_TEXCOMMITTED=1 = como antes.
-HRESULT CreateTextureResource(const D3D12_RESOURCE_DESC& desc0, ComPtr<ID3D12Resource>& out)
+// Sesion 25 (memoria de video): las texturas que llevan mucho sin usarse se liberan (TexEvict) y su hueco en el monton vuelve a
+// una lista de huecos libres que se reutiliza antes de seguir el reparto lineal.
+HRESULT CreateTextureResource(const D3D12_RESOURCE_DESC& desc0, ComPtr<ID3D12Resource>& out, TexAlloc* alloc = nullptr)
 {
     static const bool committed = getenv("GH6_TEXCOMMITTED") != nullptr;
     D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT };
+    if (alloc) *alloc = TexAlloc{};
     if (!committed)
     {
         static std::vector<ComPtr<ID3D12Heap>> heaps;
@@ -1116,6 +1201,21 @@ HRESULT CreateTextureResource(const D3D12_RESOURCE_DESC& desc0, ComPtr<ID3D12Res
         if (ai.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) { desc.Alignment = 0; ai = g_dev->GetResourceAllocationInfo(0, 1, &desc); }
         if (!broken && ai.SizeInBytes != UINT64_MAX && ai.SizeInBytes <= (32ull << 20))
         {
+            // primero, un hueco libre donde quepa (primer ajuste)
+            for (size_t i = 0; i < g_texFree.size(); i++)
+            {
+                TexAlloc& b = g_texFree[i];
+                UINT64 a = (b.off + ai.Alignment - 1) & ~(ai.Alignment - 1);
+                if (a + ai.SizeInBytes > b.off + b.size) continue;
+                HRESULT hr = g_dev->CreatePlacedResource(heaps[b.heap].Get(), a, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out));
+                if (FAILED(hr)) break;
+                if (alloc) *alloc = TexAlloc{ b.heap, a, ai.SizeInBytes };
+                TexAlloc lead{ b.heap, b.off, a - b.off }, tail{ b.heap, a + ai.SizeInBytes, b.off + b.size - (a + ai.SizeInBytes) };
+                g_texFree.erase(g_texFree.begin() + i);
+                if (lead.size >= 4096) g_texFree.push_back(lead);
+                if (tail.size >= 4096) g_texFree.push_back(tail);
+                return hr;
+            }
             UINT64 off = (used + ai.Alignment - 1) & ~(ai.Alignment - 1);
             if (heaps.empty() || off + ai.SizeInBytes > cap)
             {
@@ -1127,7 +1227,7 @@ HRESULT CreateTextureResource(const D3D12_RESOURCE_DESC& desc0, ComPtr<ID3D12Res
                 if ((heaps.size() & (heaps.size() - 1)) == 0) LOG("[d3d12] montones de texturas: %zu (%llu MB)", heaps.size(), (unsigned long long)(heaps.size() * 64));
             }
             HRESULT hr = g_dev->CreatePlacedResource(heaps.back().Get(), off, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&out));
-            if (SUCCEEDED(hr)) { used = off + ai.SizeInBytes; return hr; }
+            if (SUCCEEDED(hr)) { if (alloc) *alloc = TexAlloc{ (int)heaps.size() - 1, off, ai.SizeInBytes }; used = off + ai.SizeInBytes; return hr; }
             static int fails = 0; if (fails++ < 5) LOG("[d3d12] CreatePlacedResource fallo (%08X): recurso propio", (unsigned)hr);
         }
     }
@@ -1136,7 +1236,8 @@ fallback:
 }
 
 // ---- texturas (sesion 8): solo mip base, formatos 8888 y DXT1/3/5 ----
-struct TexEntry { ComPtr<ID3D12Resource> res; DXGI_FORMAT fmt; uint64_t dataHash = 0; uint64_t lastFrame = 0; uint64_t resolveGen = 0; uint32_t levels = 1; };
+struct TexEntry { ComPtr<ID3D12Resource> res; DXGI_FORMAT fmt; uint64_t dataHash = 0; uint64_t lastFrame = 0; uint64_t resolveGen = 0; uint32_t levels = 1; TexAlloc alloc; UINT64 bytes = 0; };
+UINT64 g_texBytes = 0;   // memoria de las texturas 2D subidas (sesion 25)
 // Sesion 24: generacion de resolves por CPU por direccion de destino. Una textura se vuelve a subir si hubo un resolve nuevo a su
 // direccion desde su ultima subida, aunque el hash de muestras coincida (texturas casi uniformes como la SSAO).
 std::unordered_map<uint32_t, uint64_t> g_cpuResolveGen;
@@ -1201,6 +1302,31 @@ std::unordered_map<uint64_t, ResolvedDepth> g_resolvedDepth;
 std::unordered_map<uint32_t, uint64_t> g_resolvedDepthLast;
 uint64_t g_texUploads = 0, g_texUploadBytes = 0, g_vbCopyBytes = 0;   // estadisticas por presentacion
 std::unordered_map<uint64_t, TexEntry> g_textures;
+// Sesion 25: si las texturas 2D pasan de GH6_TEXMB (por defecto 1024 MB), se liberan las que llevan mas de un minuto sin usarse
+// (las mas antiguas primero) hasta bajar al 75 %. Se comprueba cada 10 s. Si vuelven a hacer falta se suben de nuevo.
+void TexEvict()
+{
+    static const UINT64 budget = (UINT64)std::max(32, getenv("GH6_TEXMB") ? atoi(getenv("GH6_TEXMB")) : 1024) << 20;
+    static uint64_t lastCheck = 0;
+    if (g_frameCounter - lastCheck < 600) return;
+    lastCheck = g_frameCounter;
+    if (g_texBytes <= budget) return;
+    std::vector<std::pair<uint64_t, uint64_t>> old;   // (ultimo frame, clave)
+    for (auto& [k, e] : g_textures) if (e.res && e.lastFrame + 3600 < g_frameCounter) old.push_back({ e.lastFrame, k });
+    std::sort(old.begin(), old.end());
+    UINT64 before = g_texBytes; size_t n = 0;
+    for (auto& [lf, k] : old)
+    {
+        if (g_texBytes <= budget * 3 / 4) break;
+        auto it = g_textures.find(k); if (it == g_textures.end()) continue;
+        TexEntry& e = it->second;
+        g_deferredRelease[g_fi].push_back(e.res);
+        if (e.alloc.heap >= 0) g_texFreeDeferred[g_fi].push_back(e.alloc);
+        g_texBytes -= std::min(g_texBytes, e.bytes);
+        g_textures.erase(it); n++;
+    }
+    LOG("[d3d12] texturas liberadas: %zu (%llu MB -> %llu MB, limite %llu MB)", n, (unsigned long long)(before >> 20), (unsigned long long)(g_texBytes >> 20), (unsigned long long)(budget >> 20));
+}
 
 uint32_t TiledOuter(uint32_t y, uint32_t pitch, uint32_t log2Bpp)
 {
@@ -1541,7 +1667,8 @@ bool BindTexture(uint32_t tf, D3D12_CPU_DESCRIPTOR_HANDLE slot)
             D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = bw * blockDim; td.Height = bh * blockDim;
             td.DepthOrArraySize = 1; td.MipLevels = (UINT16)levels; td.Format = df; td.SampleDesc.Count = 1;
             double tc0 = QpcMs();
-            if (FAILED(CreateTextureResource(td, e.res))) return false;
+            if (FAILED(CreateTextureResource(td, e.res, &e.alloc))) return false;
+            e.bytes = e.alloc.size ? e.alloc.size : UINT64(td.Width) * td.Height * 4; g_texBytes += e.bytes;
             g_hTexCreateMs += QpcMs() - tc0; g_hTexNew++;
             e.fmt = df; e.levels = levels;
         }
@@ -3152,7 +3279,8 @@ static void D3D12DrawImpl(const XenosDraw& d)
         static int mrtLogged = 0;
         if (mrtLogged < 8) { mrtLogged++; LOG("[d3d12] MRT: PS %016llX RT1 info %08X mascara %X blend %08X -> %s", (unsigned long long)d.psHash, Reg(0x2003), mask1, bc1, rt1 ? "enlazado" : "no"); }
     }
-    uint64_t key = d.vsHash * 31 ^ d.psHash ^ (uint64_t(d.primType) << 56) ^ (uint64_t(bc) << 8) ^ (uint64_t(colorMask) << 48)
+    const bool panoGs = Pano() && curRt->kx > 1.001f && ttype == D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE && g_panoGs && g_rectGsPano;   // sesion 25
+    uint64_t key = (panoGs ? 0x9A3F5C7E1D2B4A68ull : 0ull) ^ d.vsHash * 31 ^ d.psHash ^ (uint64_t(d.primType) << 56) ^ (uint64_t(bc) << 8) ^ (uint64_t(colorMask) << 48)
                  ^ ((uint64_t(useDepth ? dc : 0) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(sc) << 60)) ^ (uint64_t(curRt->fmt) * 0xC2B2AE3D27D4EB4Full)
                  ^ (rt1 ? ((uint64_t(rt1->fmt) + 1) * 0x165667B19E3779F9ull ^ (uint64_t(mask1) << 36) ^ (uint64_t(bc1) * 0x27D4EB2F165667C5ull)) : 0);
     auto& pso = g_psos[key];
@@ -3163,6 +3291,7 @@ static void D3D12DrawImpl(const XenosDraw& d)
         pd.VS = { vs.blob->GetBufferPointer(), vs.blob->GetBufferSize() };
         pd.PS = { ps.blob->GetBufferPointer(), ps.blob->GetBufferSize() };
         if (rect) pd.GS = { g_rectGs->GetBufferPointer(), g_rectGs->GetBufferSize() };
+        if (panoGs) { ID3DBlob* gb = rect ? g_rectGsPano.Get() : g_panoGs.Get(); pd.GS = { gb->GetBufferPointer(), gb->GetBufferSize() }; }
         auto& rt = pd.BlendState.RenderTarget[0];
         uint32_t cs = bc & 0x1F, cop = (bc >> 5) & 7, cd = (bc >> 8) & 0x1F, as = (bc >> 16) & 0x1F, aop = (bc >> 21) & 7, ad = (bc >> 24) & 0x1F;
         rt.BlendEnable = !(cs == 1 && cd == 0 && cop == 0 && as == 1 && ad == 0 && aop == 0);
@@ -3542,6 +3671,14 @@ static void D3D12DrawImpl(const XenosDraw& d)
                         (ps.info.texture3DMask >> t) & 1 ? "3D" : (ps.info.textureCubeMask >> t) & 1 ? "cubo" : "2D",
                         (c5 >> 9) & 3, c1 & 0x3F, c1 & 0xFFFFF000, c2, c0 & 3, (ok || ok3 || okc) ? "cargada" : "BLANCA/NULA");
                 }
+            }
+            if (Pano() && curRt->kx > 1.001f)
+            {   // Sesion 25 (panoramico): que hace el VS con la interfaz 2D de este draw (XScreen.w). Lee una textura resuelta (la escena,
+                // un efecto de pantalla) -> 2 = se estira con la superficie; solo texturas normales (arte de la interfaz) -> 1 = se comprime
+                // entera al centro (todas sus piezas igual, como en 16:9); sin texturas -> 0 = regla de los bordes (fundidos a pantalla completa).
+                uint32_t tm2 = ps.info.textureMask;
+                float pk[2] = { curRt->kx, (tm2 & g_texSlotScaled) ? 2.0f : tm2 ? 1.0f : 0.0f };
+                g_list->SetGraphicsRoot32BitConstants(4, 2, pk, 0);
             }
         }
         g_list->SetGraphicsRootDescriptorTable(3, SrvGpu(baseSlot));

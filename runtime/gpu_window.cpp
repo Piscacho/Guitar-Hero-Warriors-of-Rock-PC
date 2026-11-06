@@ -122,6 +122,9 @@ void GpuStartWindow()
 {
     if (getenv("GH6_NOWINDOW")) return;
     std::thread([] {
+        // Sesion 26: con escala de Windows (p. ej. 150 % en un monitor 5120x1440) la ventana veia 3413x960 y Windows estiraba la
+        // imagen. La ventana del juego usa ahora pixeles reales del monitor. GH6_DPIVIRTUAL=1 = como antes.
+        if (!getenv("GH6_DPIVIRTUAL")) SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"GH6Recomp";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));   // icono propio (project/gh6.rc)

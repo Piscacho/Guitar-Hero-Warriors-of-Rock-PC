@@ -11,6 +11,9 @@
 #include <mmsystem.h>
 #include <Xinput.h>
 bool PsPadGetState(uint16_t& buttons, uint8_t& lt, uint8_t& rt, int16_t sticks[4]);   // dualsense.cpp
+uint64_t NetUserXuid(uint64_t offlineXuid);   // net.cpp: XUID propio con la red P2P
+const char* NetUserName();
+uint64_t NetMatchTick();   // net.cpp: momento en que se formo la partida en linea (0 = aun no)
 #include <algorithm>
 #include <cmath>
 
@@ -569,22 +572,23 @@ GUEST_IMPL(XamUserGetSigninInfo)
     if (ctx.r3.u32 != 0) { ctx.r3.u64 = X_ERROR_NO_SUCH_USER; return; }
     uint32_t p = ctx.r5.u32;
     memset(g_base + p, 0, 0x28);
-    Store64(p, kXuid); Store32(p + 0x0C, 1);
-    memcpy(g_base + p + 0x18, "Player", 7);
+    static int st = getenv("GH6_SIGNIN") ? atoi(getenv("GH6_SIGNIN")) : 1;
+    Store64(p, NetUserXuid(kXuid)); Store32(p + 0x0C, st == 2 ? 2 : 1);   // sesion 27: en LIVE (online) con XUID propio
+    strncpy((char*)g_base + p + 0x18, NetUserName(), 15);
     ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 // XamUserGetXUID(user, type_mask, xuid_ptr)
 GUEST_IMPL(XamUserGetXUID)
 {
     if (ctx.r3.u32 != 0) { ctx.r3.u64 = X_ERROR_NO_SUCH_USER; return; }
-    if (ctx.r5.u32) Store64(ctx.r5.u32, kXuid);
+    if (ctx.r5.u32) Store64(ctx.r5.u32, NetUserXuid(kXuid));
     ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 // XamUserGetName(user, buffer, size)
 GUEST_IMPL(XamUserGetName)
 {
     if (ctx.r3.u32 != 0) { ctx.r3.u64 = X_ERROR_NO_SUCH_USER; return; }
-    if (ctx.r4.u32 && ctx.r5.u32) { uint32_t n = ctx.r5.u32 < 7 ? ctx.r5.u32 : 7; memcpy(g_base + ctx.r4.u32, "Player", n); g_base[ctx.r4.u32 + n - 1] = 0; }
+    if (ctx.r4.u32 && ctx.r5.u32) { const char* nm = NetUserName(); uint32_t n = std::min<uint32_t>(ctx.r5.u32, (uint32_t)strlen(nm) + 1); memcpy(g_base + ctx.r4.u32, nm, n); g_base[ctx.r4.u32 + n - 1] = 0; }
     ctx.r3.u64 = X_ERROR_SUCCESS;
 }
 // XamShowSigninUI(users, flags): sesion 24, varios jugadores. Los jugadores 2-4 juegan como invitados (sin perfil: sus partidas
@@ -764,7 +768,7 @@ extern std::atomic<int> g_dumpSeq;       // gpu_window.cpp: frames seguidos que 
 namespace
 {
 const DWORD g_processStart = GetTickCount();
-struct ScriptStep { DWORD ms; uint16_t mask; DWORD hold; bool dump; bool fired = false; int player = 0; bool inst = false; };
+struct ScriptStep { DWORD ms; uint16_t mask; DWORD hold; bool dump; bool fired = false; int player = 0; bool inst = false; bool rel = false; };
 std::vector<ScriptStep> LoadInputScript()
 {
     std::vector<ScriptStep> v;
@@ -780,8 +784,10 @@ std::vector<ScriptStep> LoadInputScript()
     while (fgets(line, sizeof(line), f))
     {
         float secs; char btn[128] = {}; unsigned hold = 150;
-        if (line[0] == '#' || sscanf(line, "%f %127s %u", &secs, btn, &hold) < 2) continue;
+        bool rel = line[0] == '@';   // sesion 27: "@<segundos>" = desde que se forma la partida en linea (net.cpp)
+        if (line[0] == '#' || sscanf(line + (rel ? 1 : 0), "%f %127s %u", &secs, btn, &hold) < 2) continue;
         ScriptStep s{ (DWORD)(secs * 1000), 0, hold, false };
+        s.rel = rel;
         if (!strcmp(btn, "DUMP")) s.dump = true;
         else if (!strcmp(btn, "DUMP8")) { s.dump = true; s.hold = 0xFFFF; }   // 8 frames seguidos (sesion 23)
         else
@@ -1118,11 +1124,14 @@ uint16_t CurrentButtons(int u, uint8_t* lt = nullptr, uint8_t* rt = nullptr)
     if (!steps.empty())
     {
         std::lock_guard l(m);
-        DWORD now = GetTickCount() - g_processStart;
+        DWORD now0 = GetTickCount() - g_processStart;
+        uint64_t match = NetMatchTick();
         for (auto& s : steps)
         {
+            if (s.rel && !match) continue;
+            DWORD now = s.rel ? (DWORD)(GetTickCount64() - match) : now0;
             if (now < s.ms) continue;
-            if (s.dump) { if (!s.fired && u == 0) { s.fired = true; if (s.hold == 0xFFFF) g_dumpSeq = 8; else g_dumpRequest = (int)(s.ms / 1000); } continue; }
+            if (s.dump) { if (!s.fired && u == 0) { s.fired = true; if (s.hold == 0xFFFF) g_dumpSeq = 8; else g_dumpRequest = (int)(s.ms / 1000) + (s.rel ? 500 : 0); } continue; }
             if (s.player != u) continue;
             if (s.inst && !s.fired) SetInstrument(u, (Instrument(u) + 1) % 3, "guion");
             if (now < s.ms + s.hold) buttons |= s.mask;
@@ -1380,6 +1389,8 @@ GUEST_IMPL(XAudioGetVoiceCategoryVolume)
 // XamCreateEnumeratorHandle(user, app_id, open_msg, close_msg, extra_size, item_count, flags, out_handle)
 GUEST_IMPL(XamCreateEnumeratorHandle)
 {
+    if (getenv("GH6_NETLOG")) LOG("[xam] XamCreateEnumeratorHandle(usuario %u, app 0x%X, abrir 0x%08X, cerrar 0x%08X, extra %u, elementos %u, flags 0x%X)",
+                                  ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32);
     auto o = std::make_shared<KObject>();
     o->guestPtr = GuestAllocKernel((ctx.r7.u32 ? ctx.r7.u32 : 4) + 0x40, 0x10);
     if (ctx.r10.u32) Store32(ctx.r10.u32, InsertHandle(o));
@@ -1421,10 +1432,18 @@ GUEST_IMPL(XamEnumerate)
 // Sesion 24: registro de los mensajes (app 0xFB = xlivebase: logros, perfil, sesiones) para estudiar los logros
 void AchievementsInit();               // achievements.cpp (sesion 25)
 void AchievementUnlock(uint32_t id);
+bool NetXMsg(uint32_t app, uint32_t msg, uint32_t buf, uint32_t size, uint32_t& result);   // net.cpp (sesion 27)
 static void LogXMsg(const char* fn, uint32_t app, uint32_t msg, uint32_t buf, uint32_t size)
 {
     static int n = 0;
-    if (n++ < 60) LOG("[xmsg] %s(app 0x%X, mensaje 0x%08X, buffer %08X, %u bytes)", fn, app, msg, buf, size);
+    static const bool netlog = getenv("GH6_NETLOG") != nullptr;   // sesion 27: todos los mensajes al estudiar el online
+    if (n++ < (netlog ? 4000 : 60)) LOG("[xmsg] %s(app 0x%X, mensaje 0x%08X, buffer %08X, %u bytes)", fn, app, msg, buf, size);
+    if (netlog && app == 0xFB && msg >= 0x000B0010 && buf && size && size <= 64)
+    {   // sesiones (XSession*): volcado de los argumentos
+        char t[400]; int k = 0;
+        for (uint32_t i = 0; i + 4 <= size && k < 380; i += 4) k += snprintf(t + k, sizeof(t) - k, " %08X", Load32(buf + i));
+        LOG("[xmsg]   args:%s", t);
+    }
     // Sesion 25: XGI (0xFB). 0x000B0008 = XUserWriteAchievements: buffer {numero, puntero a {indice de usuario, id de logro}[]}
     if (app == 0xFB)
     {
@@ -1441,41 +1460,24 @@ GUEST_IMPL(XMsgInProcessCall) { LogXMsg("XMsgInProcessCall", ctx.r3.u32, ctx.r4.
 GUEST_IMPL(XMsgStartIORequestEx)
 {
     LogXMsg("XMsgStartIORequestEx", ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32);
-    if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, X_ERROR_SUCCESS); ctx.r3.u64 = X_ERROR_IO_PENDING; }
-    else ctx.r3.u64 = X_ERROR_SUCCESS;
+    uint32_t res = X_ERROR_SUCCESS; NetXMsg(ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32, res);   // sesiones (net.cpp)
+    if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, res); ctx.r3.u64 = X_ERROR_IO_PENDING; }
+    else ctx.r3.u64 = res;
 }
 // XMsgStartIORequest(app, message, overlapped, buffer, buffer_size)
 GUEST_IMPL(XMsgStartIORequest)
 {
     LogXMsg("XMsgStartIORequest", ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32);
-    if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, X_ERROR_SUCCESS); ctx.r3.u64 = X_ERROR_IO_PENDING; }
-    else ctx.r3.u64 = X_ERROR_SUCCESS;
+    uint32_t res = X_ERROR_SUCCESS; NetXMsg(ctx.r3.u32, ctx.r4.u32, ctx.r6.u32, ctx.r7.u32, res);   // sesiones (net.cpp)
+    if (ctx.r5.u32) { CompleteOverlapped(ctx.r5.u32, res); ctx.r3.u64 = X_ERROR_IO_PENDING; }
+    else ctx.r3.u64 = res;
 }
 
-// NetDll_XNetGetTitleXnAddr(caller, XNADDR*): como Xenia, loopback y XNET_GET_XNADDR_STATIC (antes devolvia 0 = PENDIENTE para siempre)
-// XNADDR: ina(4) inaOnline(4) wPortOnline(2) abEnet[6] abOnline[20]
-GUEST_IMPL(NetDll_XNetGetTitleXnAddr)
-{
-    uint32_t a = ctx.r4.u32;
-    if (a)
-    {
-        memset(g_base + a, 0, 36);
-        Store32(a, 0x7F000001);
-        memset(g_base + a + 10, 0xCC, 6);
-    }
-    ctx.r3.u64 = 0x04; // XNET_GET_XNADDR_STATIC
-}
 GUEST_IMPL(XCustomRegisterDynamicActions) { ctx.r3.u64 = 0; }
 // Avatares: como Xenia, XamAvatarInitialize FALLA (~0) para que el juego no los use (con "exito" se quedaba esperando
 // XamAvatarGetManifestLocalUser / XamAvatarGetMetadataRandom, que nadie completa).
 GUEST_IMPL(XamAvatarInitialize) { ctx.r3.u64 = 0xFFFFFFFF; }
-GUEST_IMPL(NetDll_XNetUnregisterInAddr) { ctx.r3.u64 = 0; }
 
-// ---- red: sin conexion ----
-GUEST_IMPL(NetDll_socket) { ctx.r3.u64 = 0xFFFFFFFF; }        // INVALID_SOCKET
-GUEST_IMPL(NetDll_bind) { ctx.r3.u64 = 0xFFFFFFFF; }          // SOCKET_ERROR
-GUEST_IMPL(NetDll_ioctlsocket) { ctx.r3.u64 = 0xFFFFFFFF; }
-GUEST_IMPL(NetDll_XNetGetEthernetLinkStatus) { ctx.r3.u64 = 0; } // sin enlace
 
 // ---- Sesion 24: diagnostico de funciones de script del lobby (GH6_CFUNCLOG=1) ----
 // Tabla de CFuncs del juego {nombre, funcion}: se registran sus resultados (r3) cuando cambian, para ver que espera la interfaz.

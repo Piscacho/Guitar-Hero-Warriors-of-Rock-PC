@@ -32,6 +32,14 @@ Microfono
 Cualquier microfono de Windows hace de microfono USB de la consola (pestana Microfono: dispositivo,
 ganancia y medidor de nivel). Se asigna al primer jugador con instrumento Voz.
 
+Juego en linea (experimental)
+Partidas en linea con otros jugadores de esta version para PC, sin servidores: la conexion va directa entre
+vuestros PCs. En el launcher, pestana "En linea": activalo, pon tu nombre y pasa tu codigo de sala a tu amigo
+(pon el suyo en "Codigos de tus amigos"). En la misma red o en una LAN virtual (Radmin VPN, ZeroTier, Tailscale)
+no hace falta codigo. En el juego: Quickplay+ -> FIND Xbox LIVE PLAYERS (boton naranja); el juego os junta solo.
+Solo se pueden tocar las canciones y DLC que tengais todos. Si tu proveedor usa CGNAT (el launcher lo avisa),
+poned los dos el codigo del otro o usad una LAN virtual. Windows puede pedir permiso al cortafuegos la primera vez.
+
 DLC
 Copia tus paquetes de contenido descargable de Xbox 360 (archivos LIVE/PIRS/CON, por ejemplo
 41560883\00000002\<archivo>) en la carpeta dlc (puede tener subcarpetas). Se importan solos al arrancar.

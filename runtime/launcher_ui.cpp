@@ -38,6 +38,9 @@ UpdateInfo UpdateCheck(const std::string& repo);
 bool UpdateInstall(const UpdateInfo& u, const std::vector<std::wstring>& preserve, const std::function<void(int, int)>& progress, std::string& err);
 bool UpdaterRelaunch();
 const char* AppVersion();
+// net.cpp (sesion 27): juego en linea P2P
+void NetLauncherStart();
+bool NetLauncherInfo(std::string& code, std::wstring& status);
 
 namespace
 {
@@ -179,8 +182,10 @@ enum
     ID_INST0 = 500, ID_PAD0 = 510, ID_STATUS0 = 520, ID_KBD = 530, ID_PS, ID_PADMODE, ID_DIAG, ID_MAPSET, ID_MAPPLAYER, ID_ASSIGN, ID_ADD, ID_RESET, ID_MAPLIST, ID_TESTPLAYER, ID_TESTPANEL,
     ID_MIC_ON = 600, ID_MIC_DEV, ID_MIC_GAIN, ID_MIC_GAINLBL, ID_MIC_METER,
     ID_ACHINFO = 700, ID_ACHLIST,
+    ID_NET_ON = 800, ID_NET_NAME, ID_NET_CODE, ID_NET_COPY, ID_NET_PEERS, ID_NET_STATUS,
 };
-constexpr int kTabs = 6;   // sesion 25: + Logros (pagina 5, dibujada encima de Ayuda en la barra lateral)
+constexpr int kTabs = 7;   // sesion 25: + Logros (pagina 5); sesion 27: + Online (pagina 6). Orden en la barra: ... Micro, Online, Logros, Ayuda
+int TabPos(int i) { return i == 6 ? 4 : i == 5 ? 5 : i == 4 ? 6 : i; }
 struct AchRow { std::wstring name, desc, howto, date; int gs = 0; bool unlocked = false; };
 // Sesion 25: + tamanos panoramicos (21:9 y 32:9)
 const wchar_t* kWinSizes[] = { L"1280 x 720", L"1600 x 900", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160",
@@ -516,7 +521,7 @@ void DrawItem(DRAWITEMSTRUCT* d)
         int i = d->CtlID - ID_TAB0; bool sel = i == g.tab;
         FillR(dc, rc, sel ? kSel : kSide);
         if (sel) { RECT bar{ rc.left, rc.top + S(8), rc.left + S(4), rc.bottom - S(8) }; FillR(dc, bar, kAccent); }
-        static const wchar_t* icons[kTabs] = { L"", L"", L"", L"", L"", L"" };
+        static const wchar_t* icons[kTabs] = { L"", L"", L"", L"", L"", L"", L"\uE774" };
         RECT ir{ rc.left + S(18), rc.top, rc.left + S(46), rc.bottom };
         Text(dc, icons[i], ir, sel ? kAccent2 : kDim, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         RECT tr{ rc.left + S(52), rc.top, rc.right, rc.bottom };
@@ -574,6 +579,7 @@ void ShowTab(int t)
     for (int p = 0; p < kTabs; p++) for (HWND h : g.pages[p]) ShowWindow(h, p == t ? SW_SHOW : SW_HIDE);
     for (int i = 0; i < kTabs; i++) InvalidateRect(Item(ID_TAB0 + i), nullptr, TRUE);
     if (t == 5) LoadAchievements();
+    if (t == 6 && Toggled(ID_NET_ON)) NetLauncherStart();
     if (t != 3) { g.meter.Stop(); g.meterOn = false; }
 }
 void StartMeter()
@@ -634,8 +640,28 @@ void BuildUi()
     IniDoc& ini = g.ini;
     auto flag = [&](const char* k, bool def) { std::string v = ini.Get(k, def ? "1" : "0"); return v != "0"; };
     // Barra lateral y pie
-    const wchar_t* tabs[kTabs] = { L"Juego", L"Imagen y audio", L"Controles", L"Micrófono", L"Ayuda", L"Logros" };
-    for (int i = 0; i < kTabs; i++) { int pos = i == 5 ? 4 : i == 4 ? 5 : i; Button(-1, tabs[i], 0, 96 + pos * 52, 180, 48, ID_TAB0 + i); }
+    const wchar_t* tabs[kTabs] = { L"Juego", L"Imagen y audio", L"Controles", L"Micrófono", L"Ayuda", L"Logros", L"En línea" };
+    for (int i = 0; i < kTabs; i++) Button(-1, tabs[i], 0, 96 + TabPos(i) * 52, 180, 48, ID_TAB0 + i);
+    // En linea (sesion 27): online P2P sin servidores
+    {
+        char un[64] = {}; DWORD unl = sizeof(un); GetUserNameA(un, &unl); un[15] = 0;
+        Label(6, L"Juego en línea (experimental)", 204, 98, 400, 22, 0, false, g.fontBold);
+        Toggle(6, L"Activar el juego en línea con otros jugadores de esta versión para PC", 204, 126, 640, ID_NET_ON, flag("online", false));
+        Label(6, L"Tu nombre", 204, 172, 150, 22);
+        SendMessageW(Edit(6, W(ini.Get("online_nombre", un)), 380, 168, 240, ID_NET_NAME), EM_SETLIMITTEXT, 15, 0);
+        Label(6, L"Tu código de sala", 204, 212, 170, 22);
+        SendMessageW(Edit(6, L"", 380, 208, 240, ID_NET_CODE), EM_SETREADONLY, TRUE, 0);
+        Button(6, L"Copiar", 630, 207, 100, 28, ID_NET_COPY);
+        Label(6, L"Activa el juego en línea para ver tu código.", 204, 244, 656, 44, ID_NET_STATUS, true);
+        Label(6, L"Códigos de tus amigos (separados por comas)", 204, 294, 500, 22);
+        Edit(6, W(ini.Get("online_amigos")), 204, 320, 656, ID_NET_PEERS);
+        Label(6, L"Cómo jugar: abrid el juego con esto activado, entrad en Quickplay+ y pulsad FIND Xbox LIVE PLAYERS\n"
+                 L"(botón naranja). El juego os junta solo y elegís canciones por turnos.\n"
+                 L"En la misma red (o en una LAN virtual) no hace falta código. Por internet, pasa tu código a tu amigo\n"
+                 L"y pon el suyo aquí. Solo se pueden tocar las canciones y DLC que tengáis todos.\n"
+                 L"No hay servidores: la conexión va directa entre vuestros PCs. Windows puede pedir permiso al\n"
+                 L"cortafuegos la primera vez (acepta en redes privadas).", 204, 360, 660, 140, 0, true);
+    }
     // Logros (sesion 25): la lista la escribe el juego en la carpeta de partidas (logros_lista.txt)
     Label(5, L"Logros", 204, 98, 200, 22, 0, false, g.fontBold);
     Label(5, L"", 300, 98, 560, 22, ID_ACHINFO, true);
@@ -825,6 +851,9 @@ bool Collect(bool requireIso)
     };
     saveMap(g_guitar, kGuitarN); saveMap(g_drum, kDrumN);
     ini.Set("microfono", Toggled(ID_MIC_ON) ? "1" : "0");
+    ini.Set("online", Toggled(ID_NET_ON) ? "1" : "0");
+    ini.Set("online_nombre", A(GetText(Item(ID_NET_NAME)), 20127));   // ASCII (la consola usa gamertags ASCII; á -> a)
+    ini.Set("online_amigos", A(GetText(Item(ID_NET_PEERS))));
     int ms = Sel(ID_MIC_DEV);
     ini.Set("microfono_dispositivo", ms >= 1 && ms <= (int)g.mics.size() ? A(g.mics[ms - 1].first, CP_UTF8) : "");
     char gb[16]; snprintf(gb, sizeof(gb), "%.2f", Gain()); ini.Set("microfono_ganancia", gb);
@@ -1074,6 +1103,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             InvalidateRect(Item(ID_MIC_METER), nullptr, FALSE);
         }
         if (g.savedT && GetTickCount() - g.savedT > 2500) { g.savedT = 0; SetWindowTextW(Item(ID_SAVED), L""); }
+        if (g.tab == 6 && g.ticks % 10 == 0)
+        {   // codigo de sala y estado de la conexion (net.cpp)
+            static std::wstring lastS; static std::string lastC;
+            std::string code; std::wstring st;
+            if (!Toggled(ID_NET_ON)) { code.clear(); st = L"Activa el juego en línea para ver tu código."; }
+            else NetLauncherInfo(code, st);
+            if (code != lastC) { lastC = code; SetWindowTextW(Item(ID_NET_CODE), W(code).c_str()); }
+            if (st != lastS) { lastS = st; SetWindowTextW(Item(ID_NET_STATUS), st.c_str()); }
+        }
         return 0;
     }
     case WM_COMMAND:
@@ -1083,6 +1121,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         {
             g.toggles[c] = !g.toggles[c]; InvalidateRect(c, nullptr, TRUE);
             if (id == ID_MIC_ON) StartMeter();
+            if (id == ID_NET_ON && g.toggles[c]) NetLauncherStart();
             return 0;
         }
         if (id >= ID_TAB0 && id < ID_TAB0 + kTabs && code == BN_CLICKED) { ShowTab(id - ID_TAB0); return 0; }
@@ -1092,6 +1131,19 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case ID_SAVE: if (Collect(false)) { g.ini.Save(ExeDir() + "\\gh6.ini"); SetWindowTextW(Item(ID_SAVED), L"Configuración guardada"); g.savedT = GetTickCount(); } return 0;
         case ID_EXIT: DestroyWindow(h); return 0;
         case ID_ISO_BROWSE: BrowseIso(); return 0;
+        case ID_NET_COPY:
+        {   // copiar el codigo de sala al portapapeles
+            std::wstring t = GetText(Item(ID_NET_CODE));
+            if (!t.empty() && OpenClipboard(h))
+            {
+                EmptyClipboard();
+                HGLOBAL m = GlobalAlloc(GMEM_MOVEABLE, (t.size() + 1) * sizeof(wchar_t));
+                if (m) { memcpy(GlobalLock(m), t.c_str(), (t.size() + 1) * sizeof(wchar_t)); GlobalUnlock(m); SetClipboardData(CF_UNICODETEXT, m); }
+                CloseClipboard();
+                SetWindowTextW(Item(ID_SAVED), L"Código copiado"); g.savedT = GetTickCount();
+            }
+            return 0;
+        }
         case ID_DIAG:
             if (MessageBoxW(h, L"Se grabarán 15 segundos de lo que pulses en los mandos conectados (guitarra, batería...).\n\n"
                                L"Al aceptar: pulsa cada traste uno a uno, rasguea arriba y abajo, mueve la palanca, inclina la guitarra "

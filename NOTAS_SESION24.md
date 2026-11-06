@@ -929,3 +929,95 @@ puntuación/estrella con bloques blancos.
   Ademas PsParamGen con escala = pos / escala (sin -0.5): el entero coincide con el pixel del juego; la lectura en texeles centra el
   subpixel en texturas escaladas y el texel en las normales. GH6_HALFPIXSCALE=1 = medio pixel de superficie en todos los draws (prueba).
 - Tirones de ~150-300 ms a mitad de partida (sesion del usuario a 1440p): justo tras 'biblioteca de PSO guardada' (37-56 MB serializados y escritos en el hilo de la GPU). Ahora el guardado va en otro hilo (g_psoLibMutex protege Load/Store/Serialize): 0 tirones tras los guardados en la prueba. Los otros tirones de esa sesion eran PSO nuevos (primera partida a 1440p con el HLSL nuevo); quedan en la biblioteca para la siguiente.
+
+## v1.3.0 publicada (2026-11-03)
+- Commit cc1682f; release v1.3.0 (zip SHA-256 83360c12...); release v1.2.1 borrada (etiqueta conservada).
+- Actualizacion real desde GitHub comprobada: run\updtest v1.2.1 -> v1.3.0 (exe identico al de la release, partida conservada).
+
+## Sesion 26 (2026-11-04): pulir panoramico y mantenimiento
+- Panoramico: la interfaz 2D se decide POR TRIANGULO en un GS (solo con panoramico; firma raiz con 2 constantes del GS en b1,
+  PSO con salt propio). Triangulo ortografico (w = 1): de borde a borde -> se estira (fundidos, fondos); de un borde hasta el centro
+  o mas -> se estira (la vineta va en dos mitades); toca solo un borde -> pegado a ese borde sin estirarse; resto -> comprimido al
+  centro. Draws que leen una textura resuelta (la escena) nunca se tocan. Verificado a 32:9 con scripts\pano_tour.txt: cancion
+  (vineta, marcador, autopista), FAILED, lobby, lista de canciones y carga correctos. Queda: el arte del menu principal / pantalla de
+  guardado (piezas que no encajan) y no probado el editor de rockero.
+- Menu principal / pantalla de guardado a 32:9: el arte va en trozos grandes; el del logo tocaba el borde izquierdo (se pegaba a el)
+  y el de la derecha cruzaba el centro (se estiraba) -> hueco negro. Regla nueva: de borde a borde o de un borde JUSTO hasta el centro
+  (+-0.02) -> se estira; toca un borde y es estrecho (< 0.6 en NDC) -> pegado a ese borde; resto (piezas anchas) -> comprimido al
+  centro. Ademas el GS saca SV_ClipDistance0/1 con los limites de la zona 16:9 comprimida: los trozos del arte que en 16:9 caian
+  fuera de la pantalla ya no asoman a los lados. Verificado 32:9 (menu, guardado, cancion, pausa, lobby, carga) y 21:9 (menu).
+  Queda una esquina tenue del marco del menu pegada arriba a la izquierda (tira estrecha); editor de rockero sin probar.
+- Usuario: "a tamano maximo (5120x1440, pantalla completa) y 32:9 solo se ven rayas". Su monitor 5120x1440 tiene escala 150 %:
+  el juego (sin DPI) veia 3413x960 y Windows estiraba la imagen. No se reprodujo aqui (pantalla completa 5120x1440, x2, 32:9, FXAA,
+  CAS 0.7: imagen limpia a 60 fps). Cambio: la ventana del juego es PER_MONITOR_AWARE_V2 (SetThreadDpiAwarenessContext en el hilo
+  de la ventana) -> cadena de intercambio a pixeles reales. GH6_DPIVIRTUAL=1 = antes. El usuario confirma: ya no hay rayas.
+- Texturas: TexEvict libera las texturas 2D sin usar en 1 min si pasan de GH6_TEXMB (1024 MB por defecto), cada 10 s; los huecos de
+  los montones vuelven a una lista libre (primer ajuste) tras la valla del frame. Probado con GH6_TEXMB=40: 403 liberadas, 2 montones,
+  sin fallos ni texturas en blanco.
+- Biblioteca de PSO: si pasa de GH6_PSOMB (192 MB) al arrancar se empieza una nueva.
+- Pruebas de esta sesion con el PC ocupado por otros procesos (tiempos de texturas muy variables): no se midio el tiron de entrada a
+  cancion. Pendiente: destileado de k_8 1280x720 (video de los menus, ~27 ms por cuadro).
+
+## Sesion 27 (2026-11-05): investigacion del online (P2P sin servidores)
+- Nuevo runtime\net.cpp: todas las funciones de red/XNet/XamSession/voz (antes stubs en import_stubs.cpp y xam.cpp). Por defecto igual
+  que antes (sin red). `GH6_NETLOG=1` registra cada llamada (y los argumentos de los mensajes XSession de la app 0xFB);
+  `GH6_NETFAKE=1` finge cable (XNetGetEthernetLinkStatus 0x0B), XNADDR en linea (flags 0xE6), XNetLogonGetTitleID y Gold.
+  Con `GH6_SIGNIN=2 GH6_NETFAKE=1` el juego se cree en Xbox LIVE. scripts\online_probe4.txt llega al lobby y pulsa
+  FIND Xbox LIVE PLAYERS (naranja).
+- Resultado: aparece la pantalla MATCHMAKING real ("Searching... Quickplay+ Waiting for additional players") sin Demonware.
+  Antes salen "Waiting for network connection" y avisos de Facebook/Twitter (Sharing, servicios Demonware; se saltan).
+- Flujo de sesiones (XGI, app 0xFB, XMsgStartIORequest):
+  - Al entrar al lobby: XSessionCreate 0x000B0010 {obj, flags 0x23 = HOST|PRESENCE|PEER_NETWORK, 8 publicas, 0 privadas, nonce, info}
+    + XamSessionCreateHandle + XSessionJoinLocal 0x000B0012 + XSessionModify 0x000B0018 (flags 0x323).
+  - Buscar: XSessionSearchEx 0x000B001C {proc 0, usuario 0, 30 resultados, 5 propiedades / 3 contextos (82A71A78 / 82A71B20),
+    buffer 0x9B6C, resultados, 1 usuario}. Sin resultados -> XSessionCreate de matchmaking (flags 0x42D = HOST|STATS|MATCHMAKING|
+    PEER_NETWORK|0x400, 4 publicas) + JoinLocal + XNetQosListen (anuncia la partida) y vuelve a buscar cada pocos segundos.
+  - Sockets: socket(AF_INET, SOCK_DGRAM, 254 = VDP) + ioctlsocket FIONBIO al arrancar (hoy falla: INVALID_SOCKET).
+  - No importa XNetRegisterKey/XNetCreateKey (lo hace XSessionCreate dentro de xam): la clave de la sesion la damos nosotros.
+- Demonware (Activision, DW 2.3, via XLSP "DSN LSP GH6"; XamCreateEnumeratorHandle app 0xFC 0x00058039 = lista de LSP, vacia):
+  stats/clasificaciones, Hero Feed, mensajes, almacenamiento, Facebook/Twitter, invitaciones. No bloquea el matchmaking; queda
+  por ver si la partida en si lo exige (prueba con dos instancias).
+- Plan P2P (sin servidores): 1) sockets reales (VDP/UDP -> UDP de Windows); 2) capa XNet propia (XNADDR = identidad del par +
+  direcciones reales; XNetXnAddrToInAddr/InAddrToXnAddr/Connect/GetConnectStatus; QoS listen/lookup con ping UDP); 3) XSession
+  (Create/Join/Modify/Start/End/Delete/SearchEx) con los resultados de nuestro descubrimiento; 4) descubrimiento: red local
+  (broadcast) y codigo de sala, despues DHT en el launcher; 5) pruebas con dos instancias en el mismo PC. Estimacion: 5-7 sesiones
+  hasta jugar por codigo/LAN; DHT 1-2 mas. Desconocidos: Demonware durante la partida, comprobacion de canciones/DLC, migracion
+  de anfitrion. Voz: fuera.
+- **Fase 2 (misma sesion): online P2P FUNCIONANDO entre dos copias en el mismo PC.** `GH6_NET=1` + `GH6_SIGNIN=2` (gh6.ini admite
+  claves GH6_*). runtime\net.cpp:
+  - Un unico puerto UDP propio (3074, o el siguiente libre: GH6_NETPORT) con protocolo 'GH6N': los sockets del juego (VDP 254 /
+    UDP) son colas virtuales por puerto del juego (el juego usa el puerto 1000); DATA lleva puerto destino/origen.
+  - XNADDR propio (IP local, puerto UDP, abEnet = id aleatorio del par); XNetXnAddrToInAddr da direcciones "seguras" 10.64.0.x;
+    127.0.0.1 = uno mismo. HELLO/HELLOACK = presentacion + ping (XNetConnect / XNetGetConnectStatus / QoS).
+  - XSession: Create (anfitrion: XNKID 0x8x aleatorio, XSESSION_INFO con nuestro XNADDR), Join (0x000B0012 sirve para locales
+    y remotos: XUIDs en +8), Modify, Delete, SearchEx (resultados de la busqueda P2P filtrados por contextos; cabecera {n, ptr} +
+    XSESSION_SEARCHRESULT 0x5C + XUSER_PROPERTY 24 + XUSER_CONTEXT 8). 0x000B0014/0x000B0015 (Start/End) = exito sin mas.
+  - Busqueda: multicast 239.255.66.6:37360 (red local) y GH6_NETPEER=ip:puerto (directo, base del "codigo de sala"); la primera
+    busqueda espera 400 ms las respuestas. XNetQosListen guarda los datos QoS que viajan en el anuncio.
+  - XUID en linea por copia (0x0009 + hash del PC y la carpeta) y nombre GH6_NOMBRE (solo con GH6_NET; las partidas guardadas
+    siguen con el XUID fijo de siempre via XamContentGetCreator). XamUserGetSigninInfo da estado 2 con GH6_SIGNIN=2.
+  - Prueba (scratchpad dual_run.ps1, run\ + run2\ con copia de userdata/shadercache/shaders; guiones online_play.txt con pasos
+    "@<s>" relativos al momento en que se forma la partida): MATCHMAKING ve al otro jugador, cuenta atras comun, eleccion de
+    canciones en linea (aviso del juego: solo DLC que tengan todos), cancion completa "Again" con dos autopistas sincronizadas
+    (misma puntuacion de banda 149.567 en ambas), resultados con los dos jugadores y segunda ronda ("Black Rain"). Sin Demonware.
+  - Sin red (por defecto) todo igual: FIND Xbox LIVE PLAYERS muestra el aviso de perfil sin LIVE.
+- Pendiente online: internet (UPnP, IP publica/perforacion de NAT, codigo de sala), pestana Online en el launcher (activar,
+  nombre, codigo, red local), partidas guardadas con XUID en linea (revisar), avisos de Facebook/Twitter (Demonware), anfitrion
+  que se va (estado 3 = perdida), prueba entre dos PCs reales y con un amigo. Cortafuegos de Windows: pedira permiso la 1a vez.
+- **Internet y launcher (misma sesion):**
+  - net.cpp: NetOpen() abre el puerto propio (tambien desde el launcher, mismo proceso -> el codigo coincide con el del juego).
+    InetThread: UPnP propio (SSDP M-SEARCH + descripcion + SOAP AddPortMapping UDP con concesion 7200 s, o 0 si el router solo
+    admite permanentes; GetExternalIPAddress; renovacion cada hora; DeletePortMapping al salir con atexit) y STUN publico
+    (stun.l.google.com:19302, stun.cloudflare.com:3478; XOR-MAPPED-ADDRESS en el puerto propio). Si la IP del router es privada
+    (o distinta de la de STUN) -> CGNAT y el codigo usa la direccion de STUN. GH6_NETNOINET / GH6_NETNOLAN para pruebas.
+  - Codigo de sala: IP (4) + puerto (2) + control (1) en base 32 de Crockford, "XXXX-XXXX-XXXX" (NetCodeEncode/Decode,
+    NetPeersFromCodes acepta codigos o ip:puerto separados por comas). Los pares por codigo reciben un QUERY cada 2 s
+    (perforacion de NAT si los dos ponen el codigo del otro; con UPnP basta con uno).
+  - gh6.ini: online=1 -> GH6_NET=1 + GH6_SIGNIN=2; online_nombre -> GH6_NOMBRE (por defecto el usuario de Windows, ASCII, 15);
+    online_amigos -> GH6_NETPEER. Launcher: pestana "En linea" (pagina 6, entre Microfono y Logros): interruptor, nombre, codigo +
+    Copiar, estado (UPnP / sin UPnP / CGNAT / sin internet), codigos de amigos e instrucciones.
+  - Pruebas: dos copias SIN busqueda local (GH6_NETNOLAN) y B con el par 127.0.0.1:3074 -> encuentra y se une. En el PC del
+    usuario: UPnP funciona pero el router tiene una IP 10.x = CGNAT del proveedor; STUN da su IP publica con el mismo puerto
+    en varias ejecuciones (buena senal para perforar). Su codigo decodifica bien.
+  - Pendiente: prueba real con un amigo por internet (CGNAT del usuario: puede requerir que los dos pongan el codigo, o LAN
+    virtual), host que se va, avisos de Facebook/Twitter, revisar partidas con el XUID en linea.

@@ -3,7 +3,6 @@
 #include "runtime.h"
 #include <ppc_recomp_shared.h>
 
-GUEST_IMPL(XamUserAreUsersFriends) { static bool once = false; if (!once) { once = true; LOG("[stub] XamUserAreUsersFriends"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamUserCreateStatsEnumerator) { static bool once = false; if (!once) { once = true; LOG("[stub] XamUserCreateStatsEnumerator"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamParseGamerTileKey) { static bool once = false; if (!once) { once = true; LOG("[stub] XamParseGamerTileKey"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamEnableInactivityProcessing) { static bool once = false; if (!once) { once = true; LOG("[stub] XamEnableInactivityProcessing"); } ctx.r3.u64 = 0; }
@@ -23,25 +22,7 @@ GUEST_IMPL(KeLockL2) { static bool once = false; if (!once) { once = true; LOG("
 GUEST_IMPL(KeUnlockL2) { static bool once = false; if (!once) { once = true; LOG("[stub] KeUnlockL2"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(KeInitializeDpc) { static bool once = false; if (!once) { once = true; LOG("[stub] KeInitializeDpc"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(VdInitializeScalerCommandBuffer) { static bool once = false; if (!once) { once = true; LOG("[stub] VdInitializeScalerCommandBuffer"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XNetLogonGetTitleID) { static bool once = false; if (!once) { once = true; LOG("[stub] XNetLogonGetTitleID"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamUserGetMembershipTierFromXUID) { static bool once = false; if (!once) { once = true; LOG("[stub] XamUserGetMembershipTierFromXUID"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamUserGetOnlineCountryFromXUID) { static bool once = false; if (!once) { once = true; LOG("[stub] XamUserGetOnlineCountryFromXUID"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_WSAStartup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_WSAStartup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_WSACleanup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_WSACleanup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_closesocket) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_closesocket"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_setsockopt) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_setsockopt"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_getsockopt) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_getsockopt"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_connect) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_connect"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_listen) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_listen"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_accept) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_accept"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_select) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_select"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_recv) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_recv"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_recvfrom) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_recvfrom"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_send) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_send"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_sendto) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_sendto"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_inet_addr) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_inet_addr"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_WSAGetLastError) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_WSAGetLastError"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll___WSAFDIsSet) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll___WSAFDIsSet"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XCustomGetCurrentGamercard) { static bool once = false; if (!once) { once = true; LOG("[stub] XCustomGetCurrentGamercard"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XCustomSetDynamicActions) { static bool once = false; if (!once) { once = true; LOG("[stub] XCustomSetDynamicActions"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XCustomGetLastActionPressEx) { static bool once = false; if (!once) { once = true; LOG("[stub] XCustomGetLastActionPressEx"); } ctx.r3.u64 = 0; }
@@ -53,9 +34,6 @@ GUEST_IMPL(XamAvatarGetAssetsResultSize) { static bool once = false; if (!once) 
 GUEST_IMPL(XamAvatarGetAssets) { static bool once = false; if (!once) { once = true; LOG("[stub] XamAvatarGetAssets"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamAvatarShutdown) { static bool once = false; if (!once) { once = true; LOG("[stub] XamAvatarShutdown"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamAvatarLoadAnimation) { static bool once = false; if (!once) { once = true; LOG("[stub] XamAvatarLoadAnimation"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamShowFriendsUI) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowFriendsUI"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamShowPlayersUI) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowPlayersUI"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamShowGamerCardUIForXUID) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowGamerCardUIForXUID"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamShowPlayerReviewUI) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowPlayerReviewUI"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamShowMarketplaceUI) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowMarketplaceUI"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamShowMessageComposeUI) { static bool once = false; if (!once) { once = true; LOG("[stub] XamShowMessageComposeUI"); } ctx.r3.u64 = 0; }
@@ -106,27 +84,6 @@ GUEST_IMPL(IoSetShareAccess) { static bool once = false; if (!once) { once = tru
 GUEST_IMPL(IoRemoveShareAccess) { static bool once = false; if (!once) { once = true; LOG("[stub] IoRemoveShareAccess"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(IoDismountVolumeByFileHandle) { static bool once = false; if (!once) { once = true; LOG("[stub] IoDismountVolumeByFileHandle"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(NtDeviceIoControlFile) { static bool once = false; if (!once) { once = true; LOG("[stub] NtDeviceIoControlFile"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetStartup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetStartup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetCleanup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetCleanup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetRandom) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetRandom"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetUnregisterKey) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetUnregisterKey"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetXnAddrToInAddr) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetXnAddrToInAddr"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetServerToInAddr) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetServerToInAddr"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetTsAddrToInAddr) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetTsAddrToInAddr"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetInAddrToXnAddr) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetInAddrToXnAddr"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetInAddrToString) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetInAddrToString"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetConnect) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetConnect"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetGetConnectStatus) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetGetConnectStatus"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetDnsLookup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetDnsLookup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetDnsRelease) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetDnsRelease"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetQosListen) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetQosListen"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetQosLookup) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetQosLookup"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(NetDll_XNetQosRelease) { static bool once = false; if (!once) { once = true; LOG("[stub] NetDll_XNetQosRelease"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamSessionRefObjByHandle) { static bool once = false; if (!once) { once = true; LOG("[stub] XamSessionRefObjByHandle"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamSessionCreateHandle) { static bool once = false; if (!once) { once = true; LOG("[stub] XamSessionCreateHandle"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamVoiceHeadsetPresent) { static bool once = false; if (!once) { once = true; LOG("[stub] XamVoiceHeadsetPresent"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamVoiceClose) { static bool once = false; if (!once) { once = true; LOG("[stub] XamVoiceClose"); } ctx.r3.u64 = 0; }
-GUEST_IMPL(XamVoiceSubmitPacket) { static bool once = false; if (!once) { once = true; LOG("[stub] XamVoiceSubmitPacket"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamInputRawState) { static bool once = false; if (!once) { once = true; LOG("[stub] XamInputRawState"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(XamInputControl) { static bool once = false; if (!once) { once = true; LOG("[stub] XamInputControl"); } ctx.r3.u64 = 0; }
 GUEST_IMPL(CurlOpenTitleBackingFile) { static bool once = false; if (!once) { once = true; LOG("[stub] CurlOpenTitleBackingFile"); } ctx.r3.u64 = 0; }

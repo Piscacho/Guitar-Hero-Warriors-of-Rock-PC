@@ -23,6 +23,10 @@ Recompilación estática para PC de **Guitar Hero: Warriors of Rock** (Xbox 360,
   para poder configurarla.
 - **Imagen**: suavizado de bordes FXAA, filtrado anisotrópico de texturas y nitidez CAS (pestaña **Imagen y audio**).
 - **Micrófono**: cualquier micrófono de Windows hace de micrófono USB de la consola (pestaña **Micrófono**).
+- **En línea (experimental)**: partidas en línea entre jugadores de esta versión para PC, sin servidores (la conexión
+  va directa entre los PCs). Pestaña **En línea**: actívalo y pasa tu código de sala a tu amigo (en la misma red o en
+  una LAN virtual no hace falta). En el juego: **Quickplay+ → FIND Xbox LIVE PLAYERS** (botón naranja). Solo se pueden
+  tocar las canciones y DLC que tengáis todos.
 - **DLC**: copia tus paquetes de Xbox 360 (archivos LIVE/PIRS/CON) en `dlc\`; se importan solos al arrancar.
 - **Sincronía**: calibra una vez en el juego, en **Options → Calibrate Lag → Calibrate**.
 - **Actualizar**: el launcher avisa de versiones nuevas (**Juego → Actualizaciones**) y se actualiza solo,

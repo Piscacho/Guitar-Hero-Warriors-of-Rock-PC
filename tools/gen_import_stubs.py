@@ -2,7 +2,7 @@
 import re
 R = "G:/Guitar Hero Warrior of rock/Recomp/"
 impl = set()
-for src in ("kernel.cpp", "threads.cpp", "fs.cpp", "gpu_stub.cpp", "xam.cpp", "xma.cpp"):
+for src in ("kernel.cpp", "threads.cpp", "fs.cpp", "gpu_stub.cpp", "xam.cpp", "xma.cpp", "net.cpp"):
     impl |= set(re.findall(r"GUEST_IMPL\((\w+)\)", open(R + "runtime/" + src).read()))
 names = [l.strip() for l in open(R + "xex/import_names.txt") if l.strip()]
 out = ["// GENERADO por tools/gen_import_stubs.py - no editar a mano.",

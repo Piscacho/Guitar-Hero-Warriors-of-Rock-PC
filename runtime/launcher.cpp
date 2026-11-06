@@ -81,6 +81,7 @@ bool XexToImage(const std::vector<uint8_t>& xex, std::vector<uint8_t>& img)
 
 // gh6.ini junto al exe: iso=..., datos=..., dlc=...
 struct LauncherConfig { std::string iso, dataDir, dlcDir; };
+std::string NetPeersFromCodes(const std::string& codes);   // net.cpp (sesion 27)
 static std::string IniPath() { return ExeDir() + "\\gh6.ini"; }
 LauncherConfig LoadConfig()
 {
@@ -114,6 +115,16 @@ LauncherConfig LoadConfig()
             else if (k == "resolucion_interna" && !v.empty()) _putenv_s("GH6_RESOLUCION", v.c_str());   // 1, 2 o 3 (sesion 25)
             else if (k == "panoramico" && !v.empty() && v != "16:9") _putenv_s("GH6_PANORAMICO", v.c_str());   // auto, 21:9, 32:9 (sesion 25)
             else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : "fxaa");
+            // sesion 27: juego en linea P2P (net.cpp). online=1 -> red propia + sesion iniciada en "LIVE"
+            else if (k == "online")
+            {
+                static bool ourSignin = false;
+                _putenv_s("GH6_NET", v == "1" ? "1" : "");
+                if (v == "1" && !getenv("GH6_SIGNIN")) { _putenv_s("GH6_SIGNIN", "2"); ourSignin = true; }
+                else if (v != "1" && ourSignin) { _putenv_s("GH6_SIGNIN", ""); ourSignin = false; }
+            }
+            else if (k == "online_nombre") _putenv_s("GH6_NOMBRE", v.c_str());
+            else if (k == "online_amigos") _putenv_s("GH6_NETPEER", NetPeersFromCodes(v).c_str());
             else if (k == "mostrar_fps") _putenv_s("GH6_FPS", v == "1" ? "1" : "0");
             else if (k == "vsync") _putenv_s("GH6_VSYNC", v == "0" ? "0" : "1");
             else if (k == "escalado") _putenv_s("GH6_UPSCALE", v == "bilineal" ? "bilineal" : "");

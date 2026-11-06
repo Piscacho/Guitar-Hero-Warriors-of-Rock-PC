@@ -28,3 +28,4 @@ rea/
 *.old
 __pycache__/
 project/build_*/
+run2/

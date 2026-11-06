@@ -572,7 +572,8 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
             // superficie; los vertices en los bordes (pases a pantalla completa, fondos) se quedan donde estan.
             size_t q = h.find("    PANO_UI\n");
             if (q != std::string::npos)
-                h.replace(q, 12, panoV ? "    if (XScreen.z > 1.0 && abs(w - 1.0) < 1e-5) { float sw = XVte.y, cx = sw * 0.5; if (p.x > 1.0 && p.x < sw - 1.0) p.x = cx + (p.x - cx) / XScreen.z; }\n" : "");
+                h.replace(q, 12, "");   // sesion 25: la compresion de la interfaz la hace el GS del panoramico, por triangulo
+                (void)panoV;
         }
     }
     else

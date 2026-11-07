@@ -1021,3 +1021,98 @@ puntuación/estrella con bloques blancos.
     en varias ejecuciones (buena senal para perforar). Su codigo decodifica bien.
   - Pendiente: prueba real con un amigo por internet (CGNAT del usuario: puede requerir que los dos pongan el codigo, o LAN
     virtual), host que se va, avisos de Facebook/Twitter, revisar partidas con el XUID en linea.
+
+## v1.4.0 publicada (2026-11-05)
+- Commit fe0a15a; release v1.4.0 "Juego en linea (experimental)" (zip SHA-256 f04292f5...). A peticion del usuario NO se borro
+  la release v1.3.0 ("por si acaso").
+- 2026-11-06: "se cerro el juego" del usuario = la app de Claude se actualizo (00:15:36) y cerro el juego que se habia lanzado
+  desde ella (log cortado sin [crash] ni informe, sin eventos de error en Windows). Ahora se abre via explorer.exe.
+  Tirones de esa sesion (32:9 + 1440p): ~10 de 50-130 ms, todos PSO nuevos (88 nuevos: el GS del panoramico cambio en 1.4 y los
+  PSO viejos no valen). Se guardan en la biblioteca; idea pendiente: precrear en segundo plano al arrancar los PSO ya vistos.
+- 2026-11-07 Menus a 21:9 / 32:9 (peticion del usuario): los fondos de borde a borde (pergamino del lobby, mapa de Quest,
+  pantallas de carga, videos, Select Rocker, lista de canciones) se estiraban al doble. Ahora: triangulo de borde a borde CON
+  textura normal (XPanoMode 1) -> modo 4 = centrado como en 16:9 + franjas laterales negras emitidas por el GS (tapan la escena 3D
+  que el juego deja detras de los menus); sin textura (fundidos) -> se sigue estirando. Las franjas salen negras con la nueva
+  interpolacion PANODIM (XVSOut.pano, solo con panoramico: VS = 1, franja = 0, el PS hace oC0.rgb *= pano; XenosInterface()).
+  Marca de menu: el GS escribe 1 en un UAV (u0, raiz 5, gs_5_1) si dibuja un modo 4; se copia a memoria legible al cerrar el
+  frame y al reutilizar el indice (2 frames despues) g_panoMenu = 1 -> las piezas estrechas pegadas a un borde (garra del marco de
+  la lista de canciones, esquinas del marco del menu) se centran con el fondo. En canciones no hay modo 4: la vineta sigue entera.
+  Verificado 32:9 (menu, Play, Create, Shop, My Stuff, Options, Select Rocker, lobby, lista, carga, cancion, pausa, FAILED, Quest,
+  cinematicas) y 21:9 (menu, lobby, lista, carga, cancion, pausa). Nota: en gs_5_1 el compilador exige un unico return en PanoMode.
+
+## Sesion 28 (2026-11-07): launcher nuevo al estilo del de Dead Space
+- launcher_ui.cpp: misma logica (IDs, Collect, gh6.ini) con estetica de el launcher del proyecto hermano Dead Space Extraction en
+  colores de Guitar Hero: ventana 1120x720, Bahnschrift, barra lateral con titulo y paginas espaciadas (la activa con panel y barra
+  naranja), panel con esquinas cortadas, filas con nombre + descripcion a la izquierda y control a la derecha, titulos de seccion,
+  conmutadores SI/NO, botones con esquinas cortadas y JUGAR grande. Selector < valor > propio (clase GHSel) que responde a
+  CB_ADDSTRING / CB_SETCURSEL / CB_GETCURSEL y avisa con CBN_SELCHANGE: sustituye a los COMBOBOX sin tocar la logica.
+  Campos de texto y listas sin borde dentro de marcos dibujados por la ventana (g.frames).
+- Paginas: INICIO (nueva, portada + ajustes rapidos: resolucion, proporcion, pantalla completa y en linea, sincronizados con sus
+  paginas; tarjeta con ISO, version y teclas), JUEGO (ISO, DLC, intro, partidas, actualizaciones, mostrar launcher), GRAFICOS,
+  CONTROLES, AUDIO (latencia + microfono), EN LINEA, LOGROS, AYUDA. Sin boton Salir (la X cierra sin guardar, como antes).
+- Portada: portada.bmp junto al exe si existe (imagen propia); si no, dibujo de llamas con el titulo. GH6_LAUNCHER_PAGE=<n> abre
+  una pagina (capturas: scratchpad launcher_pages.ps1 con una copia en scratchpad\lt, sin tocar el gh6.ini del usuario).
+- Ojo: los STATIC creados justo despues del trackbar no se pintaban: la etiqueta de ganancia se crea antes.
+- Logo oficial en el launcher: el ISO trae data\memcard\ICON0.png (320x176, logo de Warriors of Rock sobre fondo de fuego; tambien
+  data\memcard\gh.png 32x32). fs.cpp IsoExtract(iso, ruta) lee un archivo del ISO sin montarlo; el launcher lo decodifica con WIC
+  (DecodeImage) al abrir y al cambiar el ISO (LoadIsoLogo). Se usa en la portada de INICIO (centrado; a los lados se alargan las
+  columnas del borde de la imagen y se mezclan por pixel en DIB, con vineta) y como insignia en la barra lateral. Nada del juego
+  va en la release: sale del ISO de cada usuario; sin ISO se ve el dibujo de llamas y el titulo en texto. portada.bmp junto al exe
+  sigue teniendo prioridad en la portada.
+- Barra lateral: solo las letras del logo (ICON0 sin el fondo de fuego: alfa por saturacion, smoothstep 0.25-0.45, premultiplicado,
+  escalado por area en ScaleCut) con AlphaBlend. Portada propia: portada.png/.jpg/.jpeg/.bmp junto al exe (WIC); se dibuja como la
+  cabecera de Steam: arte a todo el ancho, oscurecido a la izquierda y las letras del logo encima. En el dist del usuario:
+  portada.jpg = hero de SteamGridDB (game 5283154, hero 9d35295b18abfc4a1c3508b25012fcb5, 1920x620). Es arte de la comunidad: no
+  va en el repositorio ni en la release (dist/ esta en .gitignore y make_release no lo copia).
+
+## Sesion 28: graficos (efectos a resolucion interna + SMAA)
+- Comprobado: sombras, bloom y demas efectos ya se dibujan a la resolucion interna (todas las superficies EDRAM se crean a
+  pitch*Rs(), incluidas las de sombras y bloom); recortes 720p vs 1440p lo confirman. No hace falta tocar nada.
+- SMAA 1x (iryoku/smaa, MIT; descargado con permiso del usuario): runtime/smaa/ (SMAA.hlsl, AreaTex.h, SearchTex.h, LICENSE.txt
+  sin modificar) + smaa_hlsl.inc generado por tools/gen_smaa_inc.py (el shader troceado en literales de cadena). gpu_d3d12.cpp:
+  firma propia (4 constantes b0 = SMAA_RT_METRICS, tabla de 3 SRV, muestreadores lineal s0 y punto s1), PSO de bordes por
+  luminancia (RG8), pesos de mezcla (RGBA8, AreaTex/SearchTex subidas en el primer frame) y mezcla con los vecinos a g_ppTex[0].
+  SRV fijos 24 (bordes), 25 (AreaTex), 26 (SearchTex), 28+2*frame (imagen) y 29+2*frame (pesos). Va antes del CAS, como FXAA.
+- GH6_SUAVIZADO=smaa; gh6.ini suavizado=fxaa|smaa|no; launcher Graficos -> Suavizado de bordes: FXAA / SMAA (mas nitido) /
+  Desactivado. 60 fps estables en cancion con SMAA (igual que FXAA). Comparacion de bordes del mastil en run\aa_smaa,
+  aa_fxaa2 y aa_off2 (shot_132): SMAA alisa la diagonal sin emborronar cuerdas ni texturas.
+- THIRD-PARTY-NOTICES.txt acredita SMAA; make_release.ps1 copia licenses\SMAA-MIT.txt.
+
+## Sesion 28: video de arranque en negro y personaje fuera de su marco a 32:9 (informe del usuario)
+- Videos Bink (logos e initial_boot_movie) en negro desde la v1.0.0: el decodificador y el draw YUV (PS 6EF6E0F2, planos k_8
+  lineales) funcionaban (EDRAM con el fotograma correcto), pero el video va a menos fps que la pantalla y el juego repite el mismo
+  frontbuffer varios vsync sin resolverlo. D3D12PresentResolved daba por viejo el resolve a los 2 cuadros y caia a leer la memoria
+  (en negro: el resolve fue por GPU). Ahora se sigue presentando mientras la memoria del frontbuffer no cambie
+  (inMemory || MemHash == memHash, la misma regla que la cache de texturas).
+- Las capturas (DUMP) del arranque salian negras aunque se viera bien: g_readback solo se creaba en el primer resolve por CPU.
+  EnsureReadback() lo crea tambien en la presentacion. Los puntos (prim 1, VS 6F396A6C, mascara de color 0) que se omiten durante
+  los videos son draws vacios (no afectan).
+- 32:9 en Select/Edit Rocker: el juego coloca al personaje con un desplazamiento en NDC; con la camara a 32:9 quedaba a la derecha
+  y cortado por el marco (centrado al 16:9). Ahora en los menus (marca de modo 4 con histeresis de 8 frames, g_panoMenuHold) la
+  camara del juego vuelve a 16:9 (GH6PanoCameraAspect -> global 829A2584 en cada vblank) y el GS comprime los triangulos 3D
+  (w != 1) al centro con recorte en |x| <= w/K (modo 5, XPanoMenu = 2). GH6_PANO3D=0 lo desactiva. Log "[pano] frame N: menu ...".
+- Regresion del arreglo de menus (sesion 28 anterior): en las canciones la vineta roja de peligro (UI 56A07B41/768B7F0C, textura
+  64x64 estirada) contaba como fondo de borde a borde (modo 4) -> lados en negro y escena 3D comprimida. Ahora el modo 4 exige una
+  textura de al menos 128 px por lado (XPanoMode 0.75 = textura pequena -> se estira como antes).
+- Diagnostico nuevo: GH6_PRESENTLOG=1 (por que falla la presentacion directa y media de cada captura), GH6_PANOLOG4=1|<frame>
+  (que draw activa el modo 4: indice por constante raiz XPanoDraw y UAV +4).
+- Verificado: video de arranque a 16:9 y a 32:9 1440p con SMAA; Select/Edit Rocker a 32:9 centrado en su marco; menu Create
+  centrado; cancion a 32:9 a todo el ancho; cancion a 16:9 a 60 fps.
+- Lobby de Quickplay+ a 32:9 (captura del usuario: personajes cortados y desplazados en las ranuras; en la 4a salia el de la 3a):
+  cada personaje se renderiza en una superficie estrecha (pitch 240, kx 1) y se resuelve a 224x415 (1A5B0000...); un quad de la
+  interfaz (UI 56A07B41) lo muestra en su ranura. Al leer una textura resuelta el draw iba como XPanoMode 2 ("lee la escena", sin
+  tocar) -> el retrato quedaba estirado a todo el ancho detras de los marcos comprimidos. Ahora XPanoMode 2 solo si alguna textura
+  resuelta viene de una superficie ancha (g_texSlotSx > Rs); si no, 1.25 = pieza de interfaz (se comprime), pero de borde a borde
+  (bloom 320x180, desenfoque) se sigue estirando. Verificado: lobby centrado en sus ranuras; cancion a 32:9 sin cambios.
+- La compresion 3D de los menus no afecta al lobby (A/B con GH6_PANO3D=0 igual): los retratos no pasan por superficies anchas.
+- Segunda captura del usuario (cancion con fondo negro y ondas): es el escenario "Visualizer" del juego (z_visualizer.pak), no un
+  fallo; su geometria esta pensada para 16:9.
+- Pruebas: la navegacion por menus con guiones no es determinista (a veces se pierde el primer GREEN del menu principal y se entra
+  en Create). scratchpad lobby_try.ps1 repite hasta que is_lobby.py detecta el pergamino. Ruta fiable al lobby de Quickplay+:
+  scripts\lobby_probe7.txt (GREEN x3 -> lobby de Quest, RED, DOWN, GREEN).
+- Menu de la ranura del lobby (Play Quickplay+ / Difficulty / Instrument) invisible a 32:9 (captura del usuario): la lista se
+  recorta con PA_SC_WINDOW_SCISSOR al rectangulo de la ranura; el scissor se escalaba con la superficie (x kx) mientras el GS
+  comprimia el texto al centro -> quedaba fuera. Ahora en los menus (g_panoMenu) un scissor que no ocupa todo el ancho se comprime
+  hacia el centro como la interfaz (GH6_NOPANOSCISSOR=1 = antes). Verificado en el lobby de Quickplay+ y en el de Quest.
+- Ruta de guion al lobby de Quickplay+ que funciona: scripts\lobby_probe8.txt (RED desde el lobby de Quest vuelve al menu
+  principal, no al submenu Play).

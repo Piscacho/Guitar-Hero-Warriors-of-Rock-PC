@@ -302,6 +302,52 @@ std::vector<uint8_t> FsReadIsoFile(const char* path)
     return out;
 }
 
+// Sesion 28: lee un archivo del ISO indicado sin montarlo (lo usa el launcher para el logo de data\memcard\ICON0.png).
+// relPath con '\\', sin distinguir mayusculas. Vacio si no existe o el ISO no es valido.
+std::vector<uint8_t> IsoExtract(const std::string& isoPath, const std::string& relPath)
+{
+    std::vector<uint8_t> out;
+    HANDLE h = CreateFileA(isoPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    auto rd = [&](uint64_t off, void* dst, uint32_t len) { OVERLAPPED ov{}; ov.Offset = (DWORD)off; ov.OffsetHigh = (DWORD)(off >> 32); DWORD got = 0; return ReadFile(h, dst, len, &got, &ov) && got == len; };
+    char magic[20]; uint32_t root[2];
+    if (rd(kIsoPartition + 32 * kSector, magic, 20) && !memcmp(magic, "MICROSOFT*XBOX*MEDIA", 20) && rd(kIsoPartition + 32 * kSector + 20, root, 8))
+    {
+        uint32_t sec = root[0], size = root[1]; std::string rest = relPath;
+        for (int depth = 0; depth < 16; depth++)
+        {
+            size_t p = rest.find('\\'); std::string comp = p == std::string::npos ? rest : rest.substr(0, p);
+            if (!size || size > (16u << 20)) break;
+            std::vector<uint8_t> d(size);
+            if (!rd(kIsoPartition + uint64_t(sec) * kSector, d.data(), size)) break;
+            bool found = false, dir = false; uint32_t fsec = 0, fsz = 0;
+            std::vector<uint32_t> stack{ 0 };
+            while (!stack.empty() && !found)
+            {   // tabla de directorio XDVDFS: arbol binario de entradas {izq, der, sector, tamano, atributos, longitud, nombre}
+                uint32_t off = stack.back() * 4; stack.pop_back();
+                if (off + 14 > size) continue;
+                uint16_t left = d[off] | (d[off + 1] << 8), right = d[off + 2] | (d[off + 3] << 8);
+                if (left == 0xFFFF) continue;
+                uint8_t attr = d[off + 12], nl = d[off + 13];
+                if (off + 14 + nl > size) continue;
+                std::string name((const char*)&d[off + 14], nl);
+                if (!_stricmp(name.c_str(), comp.c_str())) { memcpy(&fsec, &d[off + 4], 4); memcpy(&fsz, &d[off + 8], 4); dir = (attr & 0x10) != 0; found = true; break; }
+                if (left) stack.push_back(left);
+                if (right) stack.push_back(right);
+            }
+            if (!found) break;
+            if (p == std::string::npos)
+            {
+                if (!dir && fsz <= (64u << 20)) { out.resize(fsz); if (!rd(kIsoPartition + uint64_t(fsec) * kSector, out.data(), fsz)) out.clear(); }
+                break;
+            }
+            sec = fsec; size = fsz; rest = rest.substr(p + 1);
+        }
+    }
+    CloseHandle(h);
+    return out;
+}
+
 // NtCreateFile(handle_ptr, desired_access, obj_attributes, io_status, allocation_size, file_attributes, share_access, creation_disposition)
 // La 9a (create_options) va en la pila: r1+0x54
 GUEST_IMPL(NtCreateFile)

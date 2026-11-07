@@ -114,7 +114,7 @@ LauncherConfig LoadConfig()
             else if (k == "nitidez" && !v.empty()) _putenv_s("GH6_NITIDEZ", v.c_str());
             else if (k == "resolucion_interna" && !v.empty()) _putenv_s("GH6_RESOLUCION", v.c_str());   // 1, 2 o 3 (sesion 25)
             else if (k == "panoramico" && !v.empty() && v != "16:9") _putenv_s("GH6_PANORAMICO", v.c_str());   // auto, 21:9, 32:9 (sesion 25)
-            else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : "fxaa");
+            else if (k == "suavizado") _putenv_s("GH6_SUAVIZADO", v == "no" ? "no" : v == "smaa" ? "smaa" : "fxaa");   // sesion 28: + SMAA
             // sesion 27: juego en linea P2P (net.cpp). online=1 -> red propia + sesion iniciada en "LIVE"
             else if (k == "online")
             {

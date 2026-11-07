@@ -21,8 +21,8 @@ Recompilación estática para PC de **Guitar Hero: Warriors of Rock** (Xbox 360,
   **Guitarra CRKD (Gibson Les Paul)**: en **Controles → Preajustes** elige *Guitarra CRKD* (palanca e inclinación).
   ¿Otra guitarra que no responde bien? **Controles → Informe de mandos** graba lo que envía y genera `mandos.txt`
   para poder configurarla.
-- **Imagen**: suavizado de bordes FXAA, filtrado anisotrópico de texturas y nitidez CAS (pestaña **Imagen y audio**).
-- **Micrófono**: cualquier micrófono de Windows hace de micrófono USB de la consola (pestaña **Micrófono**).
+- **Imagen**: suavizado de bordes SMAA o FXAA, filtrado anisotrópico de texturas y nitidez CAS (pestaña **Gráficos**).
+- **Micrófono**: cualquier micrófono de Windows hace de micrófono USB de la consola (pestaña **Audio**).
 - **En línea (experimental)**: partidas en línea entre jugadores de esta versión para PC, sin servidores (la conexión
   va directa entre los PCs). Pestaña **En línea**: actívalo y pasa tu código de sala a tu amigo (en la misma red o en
   una LAN virtual no hace falta). En el juego: **Quickplay+ → FIND Xbox LIVE PLAYERS** (botón naranja). Solo se pueden

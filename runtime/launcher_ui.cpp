@@ -25,6 +25,9 @@
 #include <functional>
 #include <filesystem>
 #include <shellapi.h>
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "msimg32.lib")
 
 // Controles comunes v6 (estilos visuales modernos en la ventana del launcher)
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -40,6 +43,7 @@ bool UpdaterRelaunch();
 const char* AppVersion();
 // net.cpp (sesion 27): juego en linea P2P
 void NetLauncherStart();
+std::vector<uint8_t> IsoExtract(const std::string& isoPath, const std::string& relPath);   // fs.cpp (sesion 28)
 bool NetLauncherInfo(std::string& code, std::wstring& status);
 
 namespace
@@ -171,8 +175,12 @@ std::string BitsToNames(uint32_t b)
 }
 
 // ---- colores y estado de la ventana ----
-const COLORREF kBg = RGB(20, 16, 22), kSide = RGB(13, 10, 15), kSel = RGB(38, 30, 42), kInput = RGB(40, 34, 46), kText = RGB(237, 230, 221),
-               kDim = RGB(150, 140, 148), kAccent = RGB(232, 85, 30), kAccent2 = RGB(255, 176, 64), kLine = RGB(64, 54, 68);
+// Sesion 28: estetica como el launcher de Dead Space (paneles con esquinas cortadas, titulos espaciados, filas con descripcion,
+// selectores < valor > y conmutadores SI/NO) con los colores de Guitar Hero (fuego).
+const COLORREF kBg = RGB(12, 8, 10), kScan = RGB(17, 11, 13), kSide = RGB(9, 6, 8), kPanel = RGB(22, 14, 16), kPanelHi = RGB(52, 26, 18),
+               kBar = RGB(10, 7, 8), kSel = RGB(46, 26, 22), kInput = RGB(30, 19, 20), kText = RGB(242, 234, 226), kDim = RGB(165, 142, 136),
+               kAccent = RGB(255, 112, 36), kAccent2 = RGB(255, 192, 84), kLine = RGB(112, 52, 32), kAccentDim = RGB(190, 90, 40),
+               kPlayText = RGB(34, 10, 4);
 enum
 {
     ID_TAB0 = 100, ID_PLAY = 200, ID_SAVE, ID_EXIT, ID_SHOWLAUNCHER, ID_SAVED,
@@ -183,9 +191,15 @@ enum
     ID_MIC_ON = 600, ID_MIC_DEV, ID_MIC_GAIN, ID_MIC_GAINLBL, ID_MIC_METER,
     ID_ACHINFO = 700, ID_ACHLIST,
     ID_NET_ON = 800, ID_NET_NAME, ID_NET_CODE, ID_NET_COPY, ID_NET_PEERS, ID_NET_STATUS,
+    ID_SEC0 = 900, ID_BANNER = 990,
+    ID_Q_RES = 1100, ID_Q_PANO, ID_Q_FULL, ID_Q_NET, ID_HOME_ISO, ID_HOME_UPD, ID_HOME_KEYS,
 };
-constexpr int kTabs = 7;   // sesion 25: + Logros (pagina 5); sesion 27: + Online (pagina 6). Orden en la barra: ... Micro, Online, Logros, Ayuda
-int TabPos(int i) { return i == 6 ? 4 : i == 5 ? 5 : i == 4 ? 6 : i; }
+// Paginas: 0 Juego, 1 Graficos, 2 Controles, 3 Audio (latencia + microfono), 4 Ayuda, 5 Logros, 6 En linea, 7 Inicio
+constexpr int kTabs = 8, kHome = 7;
+const int kTabOrder[kTabs] = { kHome, 0, 1, 2, 3, 6, 5, 4 };   // orden en la barra lateral
+int TabPos(int i) { for (int k = 0; k < kTabs; k++) if (kTabOrder[k] == i) return k; return 0; }
+// Geometria (pixeles logicos a 96 ppp): barra lateral, panel de contenido y barra inferior
+constexpr int kW = 1120, kH = 720, kSideW = 250, kX0 = 280, kXR = 1086, kY0 = 30, kPanelBottom = 634, kBarTop = 648;
 struct AchRow { std::wstring name, desc, howto, date; int gs = 0; bool unlocked = false; };
 // Sesion 25: + tamanos panoramicos (21:9 y 32:9)
 const wchar_t* kWinSizes[] = { L"1280 x 720", L"1600 x 900", L"1920 x 1080", L"2560 x 1440", L"3840 x 2160",
@@ -197,9 +211,17 @@ const char* kInstIni[] = { "guitarra", "bateria", "voz" };
 struct Ui
 {
     HWND wnd = nullptr; HINSTANCE inst = nullptr; int dpi = 96;
-    HFONT font = nullptr, fontBold = nullptr, fontTitle = nullptr, fontSub = nullptr, fontTab = nullptr, fontIcon = nullptr, fontSmall = nullptr;
-    HBRUSH brBg = nullptr, brInput = nullptr, brSide = nullptr;
-    int tab = 0; std::vector<HWND> pages[kTabs];
+    HFONT font = nullptr, fontBold = nullptr, fontTitle = nullptr, fontSub = nullptr, fontTab = nullptr, fontIcon = nullptr, fontSmall = nullptr,
+          fontHead = nullptr, fontPlay = nullptr, fontBanner = nullptr;
+    HBRUSH brBg = nullptr, brInput = nullptr, brSide = nullptr, brPanel = nullptr, brBar = nullptr;
+    int tab = kHome; std::vector<HWND> pages[kTabs];
+    std::vector<std::pair<int, RECT>> frames;   // marcos dibujados detras de campos de texto y listas (pagina, rectangulo logico)
+    int nextSec = ID_SEC0;
+    HBITMAP banner = nullptr; int bannerW = 0, bannerH = 0;
+    HBITMAP logo = nullptr; int logoW = 0, logoH = 0; std::wstring logoIso;
+    std::vector<uint32_t> logoCut; int cutW = 0, cutH = 0;   // solo las letras del logo (alfa premultiplicado)
+    HBITMAP cutBmp[2] = {}; int cutBw[2] = {}, cutBh[2] = {};   // logoCut escalado (0 = barra lateral, 1 = portada)   // logo oficial leido del ISO del usuario (data\memcard\ICON0.png)
+    bool isoMissing = false;
     std::vector<AchRow> achs;
     std::map<HWND, bool> toggles; std::set<HWND> dimLabels;
     IniDoc ini;
@@ -233,25 +255,108 @@ HWND Label(int page, const wchar_t* t, int x, int y, int w, int h = 22, int id =
     if (f) SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE);
     return c;
 }
+// Titulo de seccion (texto espaciado en naranja con una raya y tres marcas); devuelve la y siguiente
+int Section(int page, int y, const wchar_t* t)
+{
+    Make(page, L"STATIC", t, SS_OWNERDRAW, kX0, y, kXR - kX0, 32, g.nextSec++);
+    return y + 40;
+}
+// Fila: nombre y descripcion a la izquierda (el control va a la derecha)
+void Row(int page, int y, const wchar_t* label, const wchar_t* hint, int labelW = 520, int hintId = 0)
+{
+    Label(page, label, kX0, y, labelW, 21);
+    if ((hint && *hint) || hintId) Label(page, hint ? hint : L"", kX0, y + 21, labelW + 40, 18, hintId, true, g.fontSmall);
+}
+// Conmutador SI/NO (84 x 26)
 HWND Toggle(int page, const wchar_t* t, int x, int y, int w, int id, bool on)
 {
     HWND c = Make(page, L"BUTTON", t, BS_OWNERDRAW | WS_TABSTOP, x, y, w, 26, id);
     g.toggles[c] = on; return c;
 }
+HWND ToggleRight(int page, int y, int id, bool on) { return Toggle(page, L"", kXR - 84, y + 6, 84, id, on); }
+// Selector  < valor >  (clase GHSel: responde a CB_ADDSTRING / CB_SETCURSEL / CB_GETCURSEL y avisa con CBN_SELCHANGE)
 HWND Combo(int page, int x, int y, int w, int id, const std::vector<std::wstring>& items, int sel)
 {
-    HWND c = Make(page, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, x, y, w, 300, id);
-    SetWindowTheme(c, L"DarkMode_CFD", nullptr);
+    HWND c = Make(page, L"GHSel", L"", WS_TABSTOP, x, y, w, 30, id);
     for (auto& s : items) SendMessageW(c, CB_ADDSTRING, 0, (LPARAM)s.c_str());
     SendMessageW(c, CB_SETCURSEL, std::clamp(sel, 0, (int)items.size() - 1), 0);
     return c;
 }
+HWND ComboRight(int page, int y, int id, const std::vector<std::wstring>& items, int sel, int w = 280) { return Combo(page, kXR - w, y + 4, w, id, items, sel); }
 HWND Button(int page, const wchar_t* t, int x, int y, int w, int h, int id) { return Make(page, L"BUTTON", t, BS_OWNERDRAW | WS_TABSTOP, x, y, w, h, id); }
+// Campo de texto sin borde dentro de un marco con esquinas cortadas
 HWND Edit(int page, const std::wstring& t, int x, int y, int w, int id)
 {
-    HWND c = Make(page, L"EDIT", t.c_str(), ES_AUTOHSCROLL | WS_TABSTOP | WS_BORDER, x, y, w, 26, id);
-    SetWindowTheme(c, L"DarkMode_CFD", nullptr);
-    return c;
+    g.frames.push_back({ page, RECT{ x, y, x + w, y + 30 } });
+    return Make(page, L"EDIT", t.c_str(), ES_AUTOHSCROLL | WS_TABSTOP, x + 10, y + 6, w - 20, 20, id);
+}
+HWND List(int page, int x, int y, int w, int h, int id, DWORD extra)
+{
+    g.frames.push_back({ page, RECT{ x, y, x + w, y + h } });
+    HWND l = Make(page, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | extra, x + 2, y + 2, w - 4, h - 4, id);
+    SetWindowTheme(l, L"DarkMode_Explorer", nullptr);
+    return l;
+}
+
+// ---- selector < valor > ----
+struct SelData { std::vector<std::wstring> items; int sel = 0, hot = 0; bool tracking = false; };
+void Chamfer(HDC dc, RECT r, int cut, COLORREF fill, COLORREF border, int width = 1);
+void Text(HDC dc, const wchar_t* t, RECT r, COLORREF c, HFONT f, UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE, int spacing = 0);
+LRESULT CALLBACK SelProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    SelData* d = (SelData*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    auto step = [&](int dir) {
+        if (!d || d->items.empty()) return;
+        int n = (int)d->items.size(); d->sel = (d->sel + dir + n) % n;
+        InvalidateRect(h, nullptr, FALSE);
+        SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(h), CBN_SELCHANGE), (LPARAM)h);
+    };
+    switch (m)
+    {
+    case WM_NCCREATE: SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)new SelData()); break;
+    case WM_NCDESTROY: delete d; SetWindowLongPtrW(h, GWLP_USERDATA, 0); break;
+    case CB_ADDSTRING: d->items.push_back((const wchar_t*)l); InvalidateRect(h, nullptr, FALSE); return (LRESULT)d->items.size() - 1;
+    case CB_RESETCONTENT: d->items.clear(); d->sel = 0; InvalidateRect(h, nullptr, FALSE); return 0;
+    case CB_SETCURSEL: d->sel = d->items.empty() ? 0 : std::clamp((int)w, 0, (int)d->items.size() - 1); InvalidateRect(h, nullptr, FALSE); return d->sel;
+    case CB_GETCURSEL: return d->items.empty() ? -1 : d->sel;
+    case CB_GETCOUNT: return (LRESULT)d->items.size();
+    case WM_GETDLGCODE: return DLGC_WANTARROWS;
+    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE: InvalidateRect(h, nullptr, FALSE); return 0;
+    case WM_LBUTTONDOWN: { SetFocus(h); RECT rc; GetClientRect(h, &rc); step(GET_X_LPARAM(l) < rc.right / 2 ? -1 : 1); return 0; }
+    case WM_LBUTTONDBLCLK: { RECT rc; GetClientRect(h, &rc); step(GET_X_LPARAM(l) < rc.right / 2 ? -1 : 1); return 0; }
+    case WM_MOUSEWHEEL: step(GET_WHEEL_DELTA_WPARAM(w) > 0 ? -1 : 1); return 0;
+    case WM_KEYDOWN: if (w == VK_LEFT) step(-1); else if (w == VK_RIGHT || w == VK_SPACE) step(1); return 0;
+    case WM_MOUSEMOVE:
+    {
+        RECT rc; GetClientRect(h, &rc); int hot = GET_X_LPARAM(l) < rc.right / 2 ? -1 : 1;
+        if (!d->tracking) { TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 }; TrackMouseEvent(&t); d->tracking = true; }
+        if (hot != d->hot) { d->hot = hot; InvalidateRect(h, nullptr, FALSE); }
+        SetCursor(LoadCursor(nullptr, IDC_HAND));
+        return 0;
+    }
+    case WM_MOUSELEAVE: d->hot = 0; d->tracking = false; InvalidateRect(h, nullptr, FALSE); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, rc.right, rc.bottom); HGDIOBJ ob = SelectObject(mem, bm);
+        HBRUSH bg = CreateSolidBrush(kPanel); FillRect(mem, &rc, bg); DeleteObject(bg);
+        bool focus = GetFocus() == h, en = IsWindowEnabled(h) != 0;
+        RECT box{ 0, 0, rc.right - 1, rc.bottom - 1 };
+        Chamfer(mem, box, S(6), d->hot ? kPanelHi : kInput, focus || d->hot ? kAccent : kLine);
+        int aw = S(30);
+        RECT left{ 0, 0, aw, rc.bottom }, right{ rc.right - aw, 0, rc.right, rc.bottom }, mid{ aw, 0, rc.right - aw, rc.bottom };
+        Text(mem, L"◀", left, d->hot < 0 ? kAccent2 : kAccentDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        Text(mem, L"▶", right, d->hot > 0 ? kAccent2 : kAccentDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (!d->items.empty()) Text(mem, d->items[d->sel].c_str(), mid, en ? kText : kDim, g.font, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, ob); DeleteObject(bm); DeleteDC(mem);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProcW(h, m, w, l);
 }
 
 // ---- mandos ----
@@ -366,6 +471,24 @@ void RoundR(HDC dc, RECT r, COLORREF fill, COLORREF border, int rad)
     RoundRect(dc, r.left, r.top, r.right, r.bottom, rad, rad);
     SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(p);
 }
+// Panel con dos esquinas cortadas (arriba a la izquierda y abajo a la derecha), la forma de toda la interfaz
+void Chamfer(HDC dc, RECT r, int cut, COLORREF fill, COLORREF border, int width)
+{
+    POINT pts[6] = { { r.left + cut, r.top }, { r.right, r.top }, { r.right, r.bottom - cut }, { r.right - cut, r.bottom }, { r.left, r.bottom }, { r.left, r.top + cut } };
+    HBRUSH b = fill == CLR_NONE ? (HBRUSH)GetStockObject(NULL_BRUSH) : CreateSolidBrush(fill);
+    HPEN p = border == CLR_NONE ? (HPEN)GetStockObject(NULL_PEN) : CreatePen(PS_SOLID, width, border);
+    HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
+    Polygon(dc, pts, 6);
+    SelectObject(dc, ob); SelectObject(dc, op);
+    if (fill != CLR_NONE) DeleteObject(b);
+    if (border != CLR_NONE) DeleteObject(p);
+}
+void LineC(HDC dc, int x0, int y0, int x1, int y1, COLORREF c, int width = 1)
+{
+    HPEN p = CreatePen(PS_SOLID, width, c); HGDIOBJ op = SelectObject(dc, p);
+    MoveToEx(dc, x0, y0, nullptr); LineTo(dc, x1, y1);
+    SelectObject(dc, op); DeleteObject(p);
+}
 void Circle(HDC dc, int cx, int cy, int r, COLORREF fill, COLORREF border)
 {
     HBRUSH b = CreateSolidBrush(fill); HPEN p = CreatePen(PS_SOLID, std::max(1, S(2)), border);
@@ -374,10 +497,44 @@ void Circle(HDC dc, int cx, int cy, int r, COLORREF fill, COLORREF border)
     SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(p);
 }
 COLORREF Dim(COLORREF c, float k) { return RGB((int)(GetRValue(c) * k), (int)(GetGValue(c) * k), (int)(GetBValue(c) * k)); }
-void Text(HDC dc, const wchar_t* t, RECT r, COLORREF c, HFONT f, UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE)
+COLORREF Mix(COLORREF a, COLORREF b, float t) { return RGB((int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t), (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t), (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t)); }
+// Letras del logo (alfa premultiplicado) escaladas a dw x dh con un promedio por area; se guarda por uso y tamano
+HBITMAP ScaleCut(int slot, int dw, int dh)
+{
+    if (g.logoCut.empty() || dw <= 0 || dh <= 0) return nullptr;
+    if (g.cutBmp[slot] && g.cutBw[slot] == dw && g.cutBh[slot] == dh) return g.cutBmp[slot];
+    if (g.cutBmp[slot]) DeleteObject(g.cutBmp[slot]);
+    BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), dw, -dh, 1, 32, BI_RGB };
+    uint32_t* px = nullptr; HBITMAP hb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+    g.cutBmp[slot] = hb; g.cutBw[slot] = dw; g.cutBh[slot] = dh;
+    if (!hb || !px) return hb;
+    for (int y = 0; y < dh; y++)
+        for (int x = 0; x < dw; x++)
+        {
+            float x0 = (float)x * g.cutW / dw, x1 = (float)(x + 1) * g.cutW / dw, y0 = (float)y * g.cutH / dh, y1 = (float)(y + 1) * g.cutH / dh;
+            float acc[4] = {}, wsum = 0;
+            for (int sy = (int)y0; sy < (int)std::ceil(y1) && sy < g.cutH; sy++)
+                for (int sx = (int)x0; sx < (int)std::ceil(x1) && sx < g.cutW; sx++)
+                {
+                    float wx = std::min(x1, (float)sx + 1) - std::max(x0, (float)sx), wy = std::min(y1, (float)sy + 1) - std::max(y0, (float)sy), wgt = wx * wy;
+                    if (wgt <= 0) continue;
+                    uint32_t c = g.logoCut[sy * g.cutW + sx];
+                    for (int k = 0; k < 4; k++) acc[k] += wgt * ((c >> (k * 8)) & 255);
+                    wsum += wgt;
+                }
+            uint32_t o = 0;
+            for (int k = 0; k < 4; k++) o |= (uint32_t)std::clamp(acc[k] / std::max(wsum, 1e-6f) + 0.5f, 0.0f, 255.0f) << (k * 8);
+            px[y * dw + x] = o;
+        }
+    return hb;
+}
+void Text(HDC dc, const wchar_t* t, RECT r, COLORREF c, HFONT f, UINT fmt, int spacing)
 {
     SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c); HGDIOBJ of = SelectObject(dc, f);
-    DrawTextW(dc, t, -1, &r, fmt | DT_NOPREFIX); SelectObject(dc, of);
+    SetTextCharacterExtra(dc, spacing);
+    DrawTextW(dc, t, -1, &r, fmt | DT_NOPREFIX);
+    SetTextCharacterExtra(dc, 0);
+    SelectObject(dc, of);
 }
 void Triangle(HDC dc, int cx, int cy, int s, bool up, COLORREF c)
 {
@@ -388,8 +545,7 @@ void Triangle(HDC dc, int cx, int cy, int s, bool up, COLORREF c)
 }
 void DrawTestPanel(HDC dc, RECT rc)
 {
-    RoundR(dc, rc, RGB(26, 21, 30), kLine, S(10));
-    int w = rc.right - rc.left, h = rc.bottom - rc.top;
+    Chamfer(dc, RECT{ rc.left, rc.top, rc.right - 1, rc.bottom - 1 }, S(10), kInput, kLine);
     if (g.capturing)
     {
         wchar_t t[128]; swprintf(t, 128, L"Pulsa un botón del mando para\n\"%s\"  (Esc cancela, %d s)", CurMap()[g.capItem].label, 8 - (int)((GetTickCount() - g.capStart) / 1000));
@@ -404,49 +560,49 @@ void DrawTestPanel(HDC dc, RECT rc)
     MapFn* m = CurMap();
     auto on = [&](int i) { return (bits & InputParseSources(Eff(m[i], p).c_str())) != 0; };
     const COLORREF fret[5] = { RGB(40, 200, 80), RGB(230, 50, 50), RGB(240, 210, 40), RGB(50, 120, 240), RGB(250, 140, 30) };
-    int r = S(16), x0 = rc.left + S(28), y0 = rc.top + S(30), dx = S(42);
+    int r = S(18), x0 = rc.left + S(36), y0 = rc.top + S(40), dx = S(48);
     if (g.mapSet == 0)
     {
         for (int i = 0; i < 5; i++) { bool o = on(i); Circle(dc, x0 + i * dx, y0, r, o ? fret[i] : Dim(fret[i], 0.25f), o ? RGB(255, 255, 255) : Dim(fret[i], 0.5f)); }
-        int ax = rc.left + S(250);
-        Triangle(dc, ax, y0 - S(10), S(10), true, on(5) ? kAccent2 : kLine);
-        Triangle(dc, ax, y0 + S(12), S(10), false, on(6) ? kAccent2 : kLine);
+        int ax = rc.left + S(300);
+        Triangle(dc, ax, y0 - S(12), S(11), true, on(5) ? kAccent2 : kLine);
+        Triangle(dc, ax, y0 + S(14), S(11), false, on(6) ? kAccent2 : kLine);
         uint32_t wm = InputParseSources(Eff(m[11], p).c_str()); int v = 0;
         if (wm & kRT) v = std::max(v, (int)rt);
         if (wm & kLT) v = std::max(v, (int)lt);
         if (wm & (0x0080 | kRSDirs)) v = std::max(v, std::min(255, std::max(std::abs((int)st[2]), std::abs((int)st[3])) >> 7));
-        RECT bar{ rc.left + S(12), rc.top + S(64), rc.left + S(190), rc.top + S(74) };
-        RoundR(dc, bar, RGB(40, 34, 46), kLine, S(6));
+        RECT bar{ rc.left + S(16), rc.top + S(84), rc.left + S(240), rc.top + S(94) };
+        Chamfer(dc, bar, S(3), kPanel, kLine);
         RECT fill = bar; fill.right = fill.left + (bar.right - bar.left) * v / 255;
-        if (v > 4) RoundR(dc, fill, kAccent, kAccent, S(6));
-        RECT lr{ bar.right + S(8), bar.top - S(6), rc.right - S(8), bar.bottom + S(6) };
+        if (v > 4) FillR(dc, fill, kAccent);
+        RECT lr{ bar.right + S(10), bar.top - S(6), rc.right - S(8), bar.bottom + S(6) };
         Text(dc, L"Palanca", lr, kDim, g.fontSmall);
-        RECT sr{ rc.left + S(12), rc.top + S(80), rc.left + S(160), rc.bottom - S(4) };
+        RECT sr{ rc.left + S(16), rc.top + S(110), rc.left + S(200), rc.bottom - S(8) };
         if (any) Text(dc, L"★ Poder estrella", sr, on(10) ? kAccent2 : kLine, g.fontSmall);
-        RECT tr{ rc.left + S(160), rc.top + S(80), rc.right - S(10), rc.bottom - S(4) };
+        RECT tr{ rc.left + S(160), rc.top + S(110), rc.right - S(14), rc.bottom - S(8) };
         Text(dc, L"START", tr, on(9) ? kAccent2 : kLine, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
     else
     {
         const int order[5] = { 1, 2, 3, 4, 0 };   // rojo, amarillo, azul, naranja, verde (como la bateria de 5 piezas)
         for (int k = 0; k < 5; k++) { int i = order[k]; bool o = on(i); Circle(dc, x0 + k * dx, y0, r, o ? fret[i] : Dim(fret[i], 0.25f), o ? RGB(255, 255, 255) : Dim(fret[i], 0.5f)); }
-        RECT kick{ rc.left + S(12), rc.top + S(60), rc.left + S(220), rc.top + S(72) };
-        RoundR(dc, kick, on(5) ? kAccent : RGB(40, 34, 46), kLine, S(6));
-        RECT kr{ kick.right + S(8), kick.top - S(6), rc.right - S(8), kick.bottom + S(6) };
+        RECT kick{ rc.left + S(16), rc.top + S(80), rc.left + S(260), rc.top + S(92) };
+        Chamfer(dc, kick, S(3), on(5) ? kAccent : kPanel, kLine);
+        RECT kr{ kick.right + S(10), kick.top - S(6), rc.right - S(8), kick.bottom + S(6) };
         Text(dc, L"Bombo", kr, on(5) ? kAccent2 : kDim, g.fontSmall);
-        RECT tr{ rc.left + S(12), rc.top + S(80), rc.right - S(10), rc.bottom - S(4) };
+        RECT tr{ rc.left + S(16), rc.top + S(110), rc.right - S(14), rc.bottom - S(8) };
         Text(dc, L"START", tr, on(8) ? kAccent2 : kLine, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
     if (!any)
     {
-        RECT nr{ rc.left + S(12), rc.top + S(80), rc.left + S(220), rc.bottom - S(4) };
+        RECT nr{ rc.left + S(16), rc.top + S(110), rc.left + S(280), rc.bottom - S(8) };
         Text(dc, L"Conecta un mando a este jugador", nr, kDim, g.fontSmall);
     }
 }
 void DrawMeter(HDC dc, RECT rc)
 {
-    RoundR(dc, rc, RGB(26, 21, 30), kLine, S(8));
-    RECT in = rc; InflateRect(&in, -S(4), -S(4));
+    Chamfer(dc, RECT{ rc.left, rc.top, rc.right - 1, rc.bottom - 1 }, S(6), kInput, kLine);
+    RECT in = rc; InflateRect(&in, -S(6), -S(6));
     float v = g.meterShown;
     int wfull = in.right - in.left, wv = (int)(wfull * std::min(1.0f, v));
     for (int x = 0; x < wv; x += S(6))
@@ -456,11 +612,140 @@ void DrawMeter(HDC dc, RECT rc)
         RECT seg{ in.left + x, in.top, std::min(in.left + x + S(4), in.right), in.bottom }; FillR(dc, seg, c);
     }
     if (g.meterHold > 0.01f) { int hx = in.left + (int)(wfull * std::min(1.0f, g.meterHold)); RECT hr{ hx - S(1), in.top, hx + S(1), in.bottom }; FillR(dc, hr, kText); }
-    if (!g.meterOn)
-    {
-        Text(dc, Toggled(ID_MIC_ON) ? L"Abriendo el micrófono..." : L"Micrófono desactivado", in, kDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    if (!g.meterOn) Text(dc, Toggled(ID_MIC_ON) ? L"Abriendo el micrófono..." : L"Micrófono desactivado", in, kDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     else if (!g.meter.ok) Text(dc, L"No se pudo abrir este micrófono", in, kDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+// Titulo de seccion: texto espaciado en naranja, raya y tres marcas a la derecha
+void DrawSection(HDC dc, RECT rc, const wchar_t* t)
+{
+    int w = rc.right - rc.left;
+    RECT tr{ 0, 0, w, S(26) };
+    Text(dc, t, tr, kAccent, g.fontHead, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(2));
+    LineC(dc, 0, S(30), w, S(30), kLine);
+    for (int k = 0; k < 3; k++) LineC(dc, w - S(6) - k * S(8), S(27), w - S(10) - k * S(8), S(33), kAccentDim);
+}
+// Portada de la pagina Inicio: portada.bmp junto al exe (una captura del juego) o, si no hay, un dibujo de fuego con el titulo
+void DrawBanner(HDC dc, RECT rc)
+{
+    int w = rc.right - rc.left, h = rc.bottom - rc.top, band = S(48), ph = h - band;
+    if (g.banner)
+    {   // portada propia (portada.png/jpg/bmp junto al exe), como la cabecera de la biblioteca de Steam: el arte cubre el ancho, se
+        // oscurece hacia la izquierda y encima van las letras del logo del juego (del ISO del usuario)
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -ph, 1, 32, BI_RGB };
+        uint32_t* pa = nullptr; HBITMAP ba = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void**)&pa, nullptr, 0);
+        if (ba && pa)
+        {
+            HDC mem = CreateCompatibleDC(dc), da = CreateCompatibleDC(dc);
+            HGDIOBJ old = SelectObject(mem, g.banner), oa = SelectObject(da, ba);
+            SetStretchBltMode(da, HALFTONE); SetBrushOrgEx(da, 0, 0, nullptr);
+            int sw = g.bannerW, sh = g.bannerW * ph / std::max(1, w);   // cubre el ancho; recorte vertical centrado
+            if (sh > g.bannerH) { sh = g.bannerH; sw = g.bannerH * w / std::max(1, ph); }
+            StretchBlt(da, 0, 0, w, ph, mem, (g.bannerW - sw) / 2, (g.bannerH - sh) / 2, sw, sh, SRCCOPY);
+            GdiFlush();
+            if (!g.logoCut.empty())
+                for (int x = 0; x < w * 55 / 100; x++)
+                {
+                    float f = 1.0f - 0.62f * std::pow(1.0f - (float)x / (w * 55 / 100), 1.4f);
+                    for (int y = 0; y < ph; y++)
+                    {
+                        uint32_t c = pa[y * w + x];
+                        pa[y * w + x] = ((uint32_t)(((c >> 16) & 255) * f) << 16) | ((uint32_t)(((c >> 8) & 255) * f) << 8) | (uint32_t)((c & 255) * f);
+                    }
+                }
+            BitBlt(dc, 0, 0, w, ph, da, 0, 0, SRCCOPY);
+            SelectObject(mem, old); SelectObject(da, oa); DeleteDC(mem); DeleteDC(da);
+        }
+        if (ba) DeleteObject(ba);
+        int lh = ph * 74 / 100, lw = g.cutW * lh / std::max(1, g.cutH);
+        if (HBITMAP lb = ScaleCut(1, lw, lh))
+        {
+            HDC mem = CreateCompatibleDC(dc); HGDIOBJ old = SelectObject(mem, lb);
+            BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            AlphaBlend(dc, S(40), (ph - lh) / 2, lw, lh, mem, 0, 0, lw, lh, bf);
+            SelectObject(mem, old); DeleteDC(mem);
+        }
+    }
+    else
+    {
+        auto grad = [&](int y) { float f = (float)y / ph; return Mix(RGB(12, 4, 6), RGB(70, 14, 6), f * f); };
+        for (int y = 0; y < ph; y++) { RECT r{ 0, y, w, y + 1 }; FillR(dc, r, grad(y)); }
+        if (g.logo)
+        {   // logo oficial (del ISO del usuario) centrado a toda la altura. Capa A: su fondo de fuego alargado a los lados (columnas
+            // del borde de la imagen); capa B: el logo. Se mezclan por pixel en los bordes del logo y se oscurece hacia fuera.
+            int lh = ph, lw = g.logoW * lh / std::max(1, g.logoH), lx = (w - lw) / 2, sw = std::max(1, g.logoW * 30 / 320), fade = std::min(S(70), lw / 4);
+            BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -ph, 1, 32, BI_RGB };
+            uint32_t *pa = nullptr, *pb = nullptr;
+            HBITMAP ba = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void**)&pa, nullptr, 0), bb = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, (void**)&pb, nullptr, 0);
+            if (ba && bb && pa && pb)
+            {
+                HDC mem = CreateCompatibleDC(dc), da = CreateCompatibleDC(dc), db = CreateCompatibleDC(dc);
+                HGDIOBJ om = SelectObject(mem, g.logo), oa = SelectObject(da, ba), ob2 = SelectObject(db, bb);
+                for (HDC x : { da, db }) { SetStretchBltMode(x, HALFTONE); SetBrushOrgEx(x, 0, 0, nullptr); }
+                StretchBlt(da, 0, 0, w / 2, ph, mem, 0, 0, sw, g.logoH, SRCCOPY);
+                StretchBlt(da, w / 2, 0, w - w / 2, ph, mem, g.logoW - sw, 0, sw, g.logoH, SRCCOPY);
+                StretchBlt(db, lx, 0, lw, lh, mem, 0, 0, g.logoW, g.logoH, SRCCOPY);
+                GdiFlush();
+                for (int x = 0; x < w; x++)
+                {
+                    float t = std::clamp(std::min((float)(x - lx), (float)(lx + lw - 1 - x)) / (float)std::max(1, fade), 0.0f, 1.0f);
+                    t = t * t * (3 - 2 * t);
+                    float v = 1.0f;
+                    if (x < lx) v = 0.30f + 0.70f * std::pow((float)x / std::max(1, lx), 0.6f);
+                    else if (x >= lx + lw) v = 0.30f + 0.70f * std::pow((float)(w - 1 - x) / std::max(1, w - lx - lw), 0.6f);
+                    for (int y = 0; y < ph; y++)
+                    {
+                        uint32_t a = pa[y * w + x], b = pb[y * w + x], o = 0;
+                        for (int c = 0; c < 24; c += 8)
+                        {
+                            float ca = (float)((a >> c) & 255) * v, cb = (float)((b >> c) & 255);
+                            o |= (uint32_t)std::clamp(ca + (cb - ca) * t, 0.0f, 255.0f) << c;
+                        }
+                        pa[y * w + x] = o;
+                    }
+                }
+                BitBlt(dc, 0, 0, w, ph, da, 0, 0, SRCCOPY);
+                SelectObject(mem, om); SelectObject(da, oa); SelectObject(db, ob2);
+                DeleteDC(mem); DeleteDC(da); DeleteDC(db);
+            }
+            if (ba) DeleteObject(ba);
+            if (bb) DeleteObject(bb);
+        }
+        else
+        {
+        // llamas: capas de picos de atras (rojo oscuro) a delante (dorado), siempre iguales
+        const COLORREF layer[4] = { RGB(90, 16, 8), RGB(150, 32, 10), RGB(220, 84, 20), RGB(255, 170, 60) };
+        uint32_t seed = 12345;
+        auto rnd = [&]() { seed = seed * 1103515245u + 12345u; return (seed >> 8) & 0xFFFF; };
+        for (int L = 0; L < 4; L++)
+        {
+            int n = 18 + L * 6, maxH = ph * (66 - L * 12) / 100;
+            std::vector<POINT> pts; pts.push_back({ 0, ph });
+            for (int i = 0; i <= n; i++)
+            {
+                int x = w * i / n, half = w / n / 2;
+                int hgt = maxH * (40 + (int)(rnd() % 60)) / 100;
+                pts.push_back({ x - half, ph - hgt / 4 }); pts.push_back({ x, ph - hgt });
+            }
+            pts.push_back({ w, ph });
+            HBRUSH b = CreateSolidBrush(layer[L]); HPEN p = CreatePen(PS_SOLID, 1, layer[L]);
+            HGDIOBJ ob = SelectObject(dc, b), op = SelectObject(dc, p);
+            Polygon(dc, pts.data(), (int)pts.size());
+            SelectObject(dc, ob); SelectObject(dc, op); DeleteObject(b); DeleteObject(p);
+        }
+        RECT t1{ 0, S(18), w, S(96) };
+        Text(dc, L"GUITAR HERO", RECT{ t1.left + S(4), t1.top + S(4), t1.right + S(4), t1.bottom + S(4) }, RGB(0, 0, 0), g.fontBanner, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(4));
+        Text(dc, L"GUITAR HERO", t1, kAccent2, g.fontBanner, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(4));
+        RECT t2{ 0, S(96), w, S(124) };
+        Text(dc, L"W A R R I O R S   O F   R O C K", RECT{ t2.left + S(2), t2.top + S(2), t2.right + S(2), t2.bottom + S(2) }, RGB(0, 0, 0), g.fontHead, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(2));
+        Text(dc, L"W A R R I O R S   O F   R O C K", t2, kText, g.fontHead, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(2));
+        for (int y = 0; y < ph; y += S(3)) LineC(dc, 0, y, w, y, RGB(0, 0, 0));   // lineas de barrido (solo en el dibujo)
+        }
+    }
+    RECT bd{ 0, ph, w, h }; FillR(dc, bd, RGB(16, 9, 10));
+    LineC(dc, 0, ph, w, ph, kAccent);
+    RECT nm{ S(20), ph, w - S(20), h };
+    Text(dc, L"GUITAR HERO: WARRIORS OF ROCK", nm, kText, g.fontHead, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(3));
+    Text(dc, L"41560883  ·  XBOX 360", nm, kAccentDim, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 }
 void DrawItem(DRAWITEMSTRUCT* d)
 {
@@ -469,8 +754,11 @@ void DrawItem(DRAWITEMSTRUCT* d)
     {
         int w = rc.right - rc.left, h = rc.bottom - rc.top;
         HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, w, h); HGDIOBJ ob = SelectObject(mem, bm);
-        RECT lr{ 0, 0, w, h }; FillR(mem, lr, kBg);
-        if (d->CtlID == ID_TESTPANEL) DrawTestPanel(mem, lr); else DrawMeter(mem, lr);
+        RECT lr{ 0, 0, w, h }; FillR(mem, lr, kPanel);
+        if (d->CtlID == ID_TESTPANEL) DrawTestPanel(mem, lr);
+        else if (d->CtlID == ID_MIC_METER) DrawMeter(mem, lr);
+        else if (d->CtlID == ID_BANNER) DrawBanner(mem, lr);
+        else { wchar_t t[128]; GetWindowTextW(d->hwndItem, t, 128); DrawSection(mem, lr, t); }
         BitBlt(dc, rc.left, rc.top, w, h, mem, 0, 0, SRCCOPY);
         SelectObject(mem, ob); DeleteObject(bm); DeleteDC(mem);
         return;
@@ -480,27 +768,27 @@ void DrawItem(DRAWITEMSTRUCT* d)
         if ((int)d->itemID < 0 || d->itemID >= g.achs.size()) return;
         const AchRow& a = g.achs[d->itemID];
         bool sel = (d->itemState & ODS_SELECTED) != 0;
-        FillR(dc, rc, sel ? kSel : kInput);
-        RECT sep{ rc.left, rc.bottom - 1, rc.right, rc.bottom }; FillR(dc, sep, kBg);
-        RECT ic{ rc.left + S(6), rc.top, rc.left + S(40), rc.bottom };
-        Text(dc, L"\uE734", ic, a.unlocked ? RGB(255, 200, 60) : kLine, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        RECT t1{ rc.left + S(44), rc.top + S(3), rc.right - S(150), rc.top + S(23) };
+        FillR(dc, rc, sel ? kSel : (d->itemID % 2 ? kInput : Mix(kInput, kPanel, 0.5f)));
+        if (sel) { RECT bar{ rc.left, rc.top, rc.left + S(3), rc.bottom }; FillR(dc, bar, kAccent); }
+        RECT ic{ rc.left + S(8), rc.top, rc.left + S(42), rc.bottom };
+        Text(dc, L"", ic, a.unlocked ? kAccent2 : kLine, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT t1{ rc.left + S(48), rc.top + S(4), rc.right - S(170), rc.top + S(24) };
         Text(dc, a.name.c_str(), t1, a.unlocked ? kText : kDim, a.unlocked ? g.fontBold : g.font, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT t2{ rc.left + S(44), rc.top + S(23), rc.right - S(10), rc.bottom - S(3) };
+        RECT t2{ rc.left + S(48), rc.top + S(24), rc.right - S(12), rc.bottom - S(4) };
         Text(dc, (a.unlocked ? a.desc : a.howto.empty() ? a.desc : a.howto).c_str(), t2, kDim, g.fontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT t3{ rc.right - S(150), rc.top + S(3), rc.right - S(10), rc.top + S(23) };
+        RECT t3{ rc.right - S(170), rc.top + S(4), rc.right - S(12), rc.top + S(24) };
         std::wstring right = std::to_wstring(a.gs) + L" G" + (a.unlocked ? L"  ·  " + a.date.substr(0, 10) : L"");
-        Text(dc, right.c_str(), t3, a.unlocked ? RGB(255, 200, 60) : kDim, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        Text(dc, right.c_str(), t3, a.unlocked ? kAccent2 : kDim, g.fontSmall, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         return;
     }
     if (d->CtlType == ODT_LISTBOX)
     {
         if ((int)d->itemID < 0) return;
         bool sel = (d->itemState & ODS_SELECTED) != 0;
-        FillR(dc, rc, sel ? kSel : kInput);
+        FillR(dc, rc, sel ? kSel : (d->itemID % 2 ? kInput : Mix(kInput, kPanel, 0.5f)));
         if (sel) { RECT bar{ rc.left, rc.top, rc.left + S(3), rc.bottom }; FillR(dc, bar, kAccent); }
         MapFn& f = CurMap()[d->itemID];
-        RECT l{ rc.left + S(10), rc.top, rc.left + S(160), rc.bottom };
+        RECT l{ rc.left + S(12), rc.top, rc.left + S(170), rc.bottom };
         Text(dc, f.label, l, kText, g.font);
         int mp = g.mapPlayer - 1; bool own = mp >= 0 && !f.ovr[mp].empty();
         std::wstring v = W(Eff(f, mp)); size_t pos; while ((pos = v.find(L'|')) != std::wstring::npos) v.replace(pos, 1, L"  /  ");
@@ -508,78 +796,115 @@ void DrawItem(DRAWITEMSTRUCT* d)
         if (mp >= 0 && !own) v += L"   (común)";
         bool cap = g.capturing && g.capItem == (int)d->itemID;
         if (cap) v = L"pulsa un botón...";
-        RECT r{ rc.left + S(160), rc.top, rc.right - S(8), rc.bottom };
+        RECT r{ rc.left + S(170), rc.top, rc.right - S(8), rc.bottom };
         Text(dc, v.c_str(), r, cap ? kAccent2 : own ? kText : kDim, g.font, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         return;
     }
     if (d->CtlType != ODT_BUTTON) return;
     HWND h = d->hwndItem;
     wchar_t t[128]; GetWindowTextW(h, t, 128);
-    bool pressed = (d->itemState & ODS_SELECTED) != 0, focus = (d->itemState & ODS_FOCUS) != 0;
-    if (d->CtlID >= ID_TAB0 && d->CtlID < ID_TAB0 + kTabs)
-    {
-        int i = d->CtlID - ID_TAB0; bool sel = i == g.tab;
-        FillR(dc, rc, sel ? kSel : kSide);
-        if (sel) { RECT bar{ rc.left, rc.top + S(8), rc.left + S(4), rc.bottom - S(8) }; FillR(dc, bar, kAccent); }
-        static const wchar_t* icons[kTabs] = { L"", L"", L"", L"", L"", L"", L"\uE774" };
-        RECT ir{ rc.left + S(18), rc.top, rc.left + S(46), rc.bottom };
-        Text(dc, icons[i], ir, sel ? kAccent2 : kDim, g.fontIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        RECT tr{ rc.left + S(52), rc.top, rc.right, rc.bottom };
-        Text(dc, t, tr, sel ? kText : kDim, g.fontTab);
-        return;
-    }
-    FillR(dc, rc, kBg);
+    bool pressed = (d->itemState & ODS_SELECTED) != 0, focus = (d->itemState & ODS_FOCUS) != 0, disabled = (d->itemState & ODS_DISABLED) != 0;
+    int w = rc.right - rc.left, hh = rc.bottom - rc.top;
+    HDC mem = CreateCompatibleDC(dc); HBITMAP bm = CreateCompatibleBitmap(dc, w, hh); HGDIOBJ ob = SelectObject(mem, bm);
+    RECT r{ 0, 0, w, hh }, box{ 0, 0, w - 1, hh - 1 };
+    bool isTab = d->CtlID >= ID_TAB0 && d->CtlID < ID_TAB0 + kTabs, onBar = d->CtlID == ID_SAVE || d->CtlID == ID_PLAY;
+    FillR(mem, r, isTab ? kSide : onBar ? kBar : kPanel);
     auto tg = g.toggles.find(h);
-    if (tg != g.toggles.end())
-    {
-        bool on = tg->second;
-        int pw = S(40), ph = S(20), py = rc.top + (rc.bottom - rc.top - ph) / 2;
-        RECT pill{ rc.left, py, rc.left + pw, py + ph };
-        RoundR(dc, pill, on ? kAccent : kLine, on ? kAccent : kLine, ph);
-        int kr = ph / 2 - S(3), kx = on ? pill.right - ph / 2 : pill.left + ph / 2;
-        Circle(dc, kx, py + ph / 2, kr, on ? RGB(255, 255, 255) : kDim, on ? RGB(255, 255, 255) : kDim);
-        RECT tr{ rc.left + pw + S(12), rc.top, rc.right, rc.bottom };
-        Text(dc, t, tr, kText, g.font);
-        if (focus) { RECT fr = tr; fr.right = fr.left + S(4); }
-        return;
+    if (isTab)
+    {   // pagina de la barra lateral: nombre espaciado; la activa con panel, borde y barra naranja
+        int i = d->CtlID - ID_TAB0; bool sel = i == g.tab;
+        if (sel) Chamfer(mem, box, S(10), kPanelHi, kAccent);
+        else if (pressed) Chamfer(mem, box, S(10), kPanel, kLine);
+        std::wstring up = t; CharUpperBuffW(up.data(), (DWORD)up.size());
+        RECT tr{ S(22), 0, w, hh };
+        Text(mem, up.c_str(), tr, sel ? kText : kDim, g.fontTab, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(2));
+        if (sel) LineC(mem, S(10), S(13), S(10), hh - S(13), kAccent, S(3));
     }
-    bool play = d->CtlID == ID_PLAY;
-    COLORREF fill = play ? (pressed ? RGB(190, 60, 20) : kAccent) : (pressed ? kSel : kInput);
-    RoundR(dc, rc, fill, play ? kAccent2 : (focus ? kDim : kLine), S(8));
-    Text(dc, t, rc, play ? RGB(255, 255, 255) : kText, play ? g.fontBold : g.font, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    else if (tg != g.toggles.end())
+    {   // conmutador SI / NO
+        bool on = tg->second;
+        Chamfer(mem, box, S(6), on ? kPanelHi : kInput, on || focus ? kAccent : kLine);
+        RECT knob = on ? RECT{ box.right - S(36), S(4), box.right - S(4), box.bottom - S(4) } : RECT{ S(4), S(4), S(36), box.bottom - S(4) };
+        Chamfer(mem, knob, S(4), on ? kAccent : kLine, CLR_NONE);
+        RECT lb = box; if (on) lb.right -= S(38); else lb.left += S(38);
+        Text(mem, on ? L"SÍ" : L"NO", lb, on ? kAccent2 : kDim, g.fontSmall, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(1));
+    }
+    else if (d->CtlID == ID_PLAY)
+    {
+        Chamfer(mem, box, S(12), disabled ? kLine : pressed ? RGB(220, 90, 24) : kAccent, CLR_NONE);
+        Text(mem, L"JUGAR", r, kPlayText, g.fontPlay, DT_CENTER | DT_VCENTER | DT_SINGLELINE, S(4));
+    }
+    else
+    {
+        Chamfer(mem, box, S(8), pressed ? kPanelHi : kInput, focus ? kAccent : kLine);
+        std::wstring up = t; if (onBar) CharUpperBuffW(up.data(), (DWORD)up.size());
+        Text(mem, up.c_str(), r, disabled ? kDim : pressed ? kAccent2 : kText, onBar ? g.fontTab : g.fontBold, DT_CENTER | DT_VCENTER | DT_SINGLELINE, onBar ? S(2) : 0);
+    }
+    BitBlt(dc, rc.left, rc.top, w, hh, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, ob); DeleteObject(bm); DeleteDC(mem);
 }
-void PaintMain(HDC dc)
+void PaintMain(HDC dc0)
 {
     RECT rc; GetClientRect(g.wnd, &rc);
+    HDC dc = CreateCompatibleDC(dc0); HBITMAP bm = CreateCompatibleBitmap(dc0, rc.right, rc.bottom); HGDIOBJ ob = SelectObject(dc, bm);
     FillR(dc, rc, kBg);
-    int head = S(78), side = S(180), foot = rc.bottom - S(62);
-    for (int y = 0; y < head; y++)   // degradado del encabezado (rojo fuego -> fondo)
-    {
-        float f = (float)y / head;
-        COLORREF c = RGB((int)(70 * (1 - f) + 20 * f), (int)(18 * (1 - f) + 16 * f), (int)(14 * (1 - f) + 22 * f));
-        RECT r{ 0, y, rc.right, y + 1 }; FillR(dc, r, c);
+    for (int y = 0; y < rc.bottom; y += S(3)) LineC(dc, 0, y, rc.right, y, kScan);
+    // barra lateral con el titulo
+    int side = S(kSideW);
+    RECT sb{ 0, 0, side, rc.bottom }; FillR(dc, sb, kSide);
+    LineC(dc, side, 0, side, rc.bottom, kLine);
+    if (!g.logoCut.empty())
+    {   // solo las letras del logo del juego (sin su fondo de fuego), con transparencia sobre la barra lateral
+        RECT bd{ S(16), S(14), side - S(16), S(168) };
+        int bw = bd.right - bd.left, bh = bd.bottom - bd.top, dw = bw, dh = g.cutH * bw / std::max(1, g.cutW);
+        if (dh > bh) { dh = bh; dw = g.cutW * bh / std::max(1, g.cutH); }
+        HBITMAP lb = ScaleCut(0, dw, dh);
+        if (lb)
+        {
+            HDC mem = CreateCompatibleDC(dc); HGDIOBJ old = SelectObject(mem, lb);
+            BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            AlphaBlend(dc, bd.left + (bw - dw) / 2, bd.top + (bh - dh) / 2, dw, dh, mem, 0, 0, dw, dh, bf);
+            SelectObject(mem, old); DeleteDC(mem);
+        }
     }
-    RECT line{ 0, head - S(2), rc.right, head }; FillR(dc, line, kAccent);
-    RECT t1{ S(22), S(8), rc.right, S(50) };
-    Text(dc, L"GUITAR HERO", { t1.left + S(2), t1.top + S(2), t1.right, t1.bottom + S(2) }, RGB(0, 0, 0), g.fontTitle);
-    Text(dc, L"GUITAR HERO", t1, kAccent2, g.fontTitle);
-    RECT t2{ S(24), S(46), rc.right, S(72) };
-    Text(dc, L"WARRIORS OF ROCK  ·  versión para PC recompilada", t2, kText, g.fontSub);
-    RECT t3{ 0, S(10), rc.right - S(20), S(40) };
-    wchar_t ver[32]; swprintf(ver, 32, L"v%hs", AppVersion());
-    Text(dc, ver, t3, kDim, g.fontSmall, DT_RIGHT | DT_TOP | DT_SINGLELINE);
-    RECT sb{ 0, head, side, foot }; FillR(dc, sb, kSide);
-    RECT fl{ 0, foot, rc.right, foot + 1 }; FillR(dc, fl, kLine);
-    
+    else
+    {
+        RECT t1{ S(22), S(54), side - S(8), S(94) };
+        Text(dc, L"GUITAR HERO", RECT{ t1.left + S(2), t1.top + S(2), t1.right + S(2), t1.bottom + S(2) }, RGB(0, 0, 0), g.fontTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(1));
+        Text(dc, L"GUITAR HERO", t1, kAccent2, g.fontTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(1));
+        RECT t2{ S(24), S(96), side - S(8), S(116) };
+        Text(dc, L"W A R R I O R S   O F   R O C K", t2, kAccent, g.fontSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    LineC(dc, S(24), S(176), side - S(24), S(176), kLine);
+    RECT t3{ S(24), S(182), side - S(8), S(204) };
+    Text(dc, L"PORT PC", t3, kAccent, g.fontHead, DT_LEFT | DT_VCENTER | DT_SINGLELINE, S(4));
+    RECT t4{ S(24), S(204), side - S(8), S(222) };
+    wchar_t by[64]; swprintf(by, 64, L"por Piscacho  ·  v%hs", AppVersion());
+    Text(dc, by, t4, kDim, g.fontSmall);
+    RECT note{ S(24), S(kH - 70), side - S(12), S(kH - 16) };
+    Text(dc, L"En el juego: F11 o Alt+Intro\npantalla completa  ·  F3 FPS", note, kDim, g.fontSmall, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    // panel de contenido y marcos de la pagina
+    RECT panel{ S(kX0 - 14), S(16), S(kXR + 14), S(kPanelBottom) };
+    Chamfer(dc, panel, S(18), kPanel, kLine);
+    for (auto& [p, fr] : g.frames)
+        if (p == g.tab || p < 0) Chamfer(dc, RECT{ S(fr.left), S(fr.top), S(fr.right), S(fr.bottom) }, S(6), kInput, kLine);
+    // barra inferior
+    RECT bar{ side + 1, S(kBarTop), rc.right, rc.bottom }; FillR(dc, bar, kBar);
+    LineC(dc, side, S(kBarTop), rc.right, S(kBarTop), kLine);
+    BitBlt(dc0, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+    SelectObject(dc, ob); DeleteObject(bm); DeleteDC(dc);
 }
 void LoadAchievements();
+void UpdateHome();
 void ShowTab(int t)
 {
     g.tab = t;
     for (int p = 0; p < kTabs; p++) for (HWND h : g.pages[p]) ShowWindow(h, p == t ? SW_SHOW : SW_HIDE);
+    InvalidateRect(g.wnd, nullptr, TRUE);
     for (int i = 0; i < kTabs; i++) InvalidateRect(Item(ID_TAB0 + i), nullptr, TRUE);
     if (t == 5) LoadAchievements();
     if (t == 6 && Toggled(ID_NET_ON)) NetLauncherStart();
+    if (t == kHome) UpdateHome();
     if (t != 3) { g.meter.Stop(); g.meterOn = false; }
 }
 void StartMeter()
@@ -635,168 +960,254 @@ void BrowseFolder(int editId)
 }
 
 // ---- crear la ventana a partir de gh6.ini ----
+// Sesion 28: paginas con filas (nombre + descripcion a la izquierda, control a la derecha) como el launcher de Dead Space
 void BuildUi()
 {
     IniDoc& ini = g.ini;
     auto flag = [&](const char* k, bool def) { std::string v = ini.Get(k, def ? "1" : "0"); return v != "0"; };
-    // Barra lateral y pie
-    const wchar_t* tabs[kTabs] = { L"Juego", L"Imagen y audio", L"Controles", L"Micrófono", L"Ayuda", L"Logros", L"En línea" };
-    for (int i = 0; i < kTabs; i++) Button(-1, tabs[i], 0, 96 + TabPos(i) * 52, 180, 48, ID_TAB0 + i);
-    // En linea (sesion 27): online P2P sin servidores
+    // Barra lateral (por orden de kTabOrder) y barra inferior
+    const wchar_t* tabs[kTabs] = { L"Juego", L"Gráficos", L"Controles", L"Audio", L"Ayuda", L"Logros", L"En línea", L"Inicio" };
+    for (int i = 0; i < kTabs; i++) Button(-1, tabs[i], 16, 236 + TabPos(i) * 48, kSideW - 32, 40, ID_TAB0 + i);
+    Label(-1, L"", kX0, kBarTop + 26, 380, 22, ID_SAVED, true);
+    Button(-1, L"Guardar", kW - 390, kBarTop + 16, 140, 42, ID_SAVE);
+    Button(-1, L"JUGAR", kW - 234, kBarTop + 12, 200, 50, ID_PLAY);
+
+    // Opciones compartidas por Inicio y las otras paginas
+    std::string rs = ini.Get("resolucion_interna", "1"), pn = ini.Get("panoramico", "16:9");
+    const std::vector<std::wstring> resItems = { L"720p (como la consola)", L"1440p (2x, recomendada)", L"2160p / 4K (3x, PC potente)" };
+    const std::vector<std::wstring> panoItems = { L"16:9 (como la consola)", L"Panorámica del monitor", L"21:9 (experimental)", L"32:9 (experimental)" };
+    int resSel = rs == "2" ? 1 : rs == "3" ? 2 : 0, panoSel = pn == "auto" ? 1 : pn == "21:9" ? 2 : pn == "32:9" ? 3 : 0;
+
+    // ---- Inicio: portada y ajustes rapidos ----
+    {
+        int y = kY0;
+        Make(kHome, L"STATIC", L"", SS_OWNERDRAW, kX0, y, kXR - kX0, 244, ID_BANNER);
+        y = Section(kHome, y + 258, L"AJUSTES RÁPIDOS");
+        Row(kHome, y, L"Resolución interna", L"El juego se dibuja a 2x o 3x la resolución de la consola: más nítido."); ComboRight(kHome, y, ID_Q_RES, resItems, resSel); y += 44;
+        Row(kHome, y, L"Proporción de la imagen", L"21:9 y 32:9 amplían la vista a los lados; menús y HUD quedan en el centro."); ComboRight(kHome, y, ID_Q_PANO, panoItems, panoSel); y += 44;
+        Row(kHome, y, L"Pantalla completa", L"Sin bordes, en el monitor de la ventana. F11 la alterna en el juego."); ToggleRight(kHome, y, ID_Q_FULL, flag("pantalla_completa", false)); y += 44;
+        Row(kHome, y, L"Juego en línea (experimental)", L"Partidas con otros jugadores de esta versión. Más opciones en EN LÍNEA."); ToggleRight(kHome, y, ID_Q_NET, flag("online", false)); y += 48;
+        g.frames.push_back({ kHome, RECT{ kX0, y, kXR, y + 80 } });
+        Label(kHome, L"", kX0 + 16, y + 8, kXR - kX0 - 32, 20, ID_HOME_ISO);
+        Label(kHome, L"", kX0 + 16, y + 31, kXR - kX0 - 32, 18, ID_HOME_UPD, true, g.fontSmall);
+        Label(kHome, L"Teclado: flechas  ·  Intro = Start  ·  1-5 = trastes  ·  Retroceso = poder estrella  ·  F6 = instrumento del teclado",
+              kX0 + 16, y + 52, kXR - kX0 - 32, 18, ID_HOME_KEYS, true, g.fontSmall);
+    }
+
+    // ---- Juego ----
+    {
+        int y = Section(0, kY0, L"ARCHIVOS DEL JUEGO");
+        Row(0, y, L"ISO del juego (Xbox 360)", L"Guitar Hero - Warriors of Rock (USA, Europe) (En,Fr,De,Es,It)"); y += 42;
+        Edit(0, W(ini.Get("iso")), kX0, y, kXR - kX0 - 140, ID_ISO);
+        Button(0, L"Examinar...", kXR - 130, y, 130, 30, ID_ISO_BROWSE); y += 42;
+        Row(0, y, L"Carpeta de DLC", nullptr, 520, ID_DLCCOUNT); y += 42;
+        Edit(0, W(ini.Get("dlc", ExeDir() + "\\dlc")), kX0, y, kXR - kX0 - 140, ID_DLC);
+        Button(0, L"Examinar...", kXR - 130, y, 130, 30, ID_DLC_BROWSE); y += 42;
+        Row(0, y, L"Saltar el vídeo de logos al arrancar", L"Entra directo a la pantalla de título."); ToggleRight(0, y, ID_SKIPINTRO, flag("saltar_intro", true)); y += 46;
+        y = Section(0, y, L"PARTIDAS");
+        Label(0, L"", kX0, y, kXR - kX0, 20, ID_SAVEINFO, true, g.fontSmall); y += 24;
+        Button(0, L"Abrir carpeta", kX0, y, 160, 32, ID_SAVEOPEN);
+        Button(0, L"Empezar de cero", kX0 + 172, y, 180, 32, ID_SAVERESET);
+        Button(0, L"Restaurar respaldo", kX0 + 364, y, 190, 32, ID_SAVERESTORE); y += 44;
+        y = Section(0, y, L"ACTUALIZACIONES Y LAUNCHER");
+        Label(0, L"", kX0, y, kXR - kX0 - 240, 20, ID_UPDINFO, true, g.fontSmall);
+        Button(0, L"Buscar actualizaciones", kXR - 230, y - 4, 230, 30, ID_UPDCHECK); y += 32;
+        Row(0, y, L"Buscar actualizaciones al abrir", L"Avisa si hay una versión nueva en GitHub."); ToggleRight(0, y, ID_UPDAUTO, flag("actualizar_al_abrir", true)); y += 42;
+        Row(0, y, L"Mostrar este launcher al iniciar", L"Si lo desactivas, mantén Mayús al abrir el juego para verlo."); ToggleRight(0, y, ID_SHOWLAUNCHER, flag("mostrar_launcher", true));
+    }
+
+    // ---- Graficos ----
+    {
+        int ws = 0; std::string v = ini.Get("ventana", "1280x720");
+        for (int i = 0; i < kNumWinSizes; i++) if (v == kWinSizesIni[i]) ws = i;
+        std::string an = ini.Get("anisotropico", "16"), ni = ini.Get("nitidez", "0.4");
+        int y = Section(1, kY0, L"IMAGEN");
+        Row(1, y, L"Resolución interna", L"1440p va igual de fluido que 720p en un PC actual; 4K pide una tarjeta potente."); ComboRight(1, y, ID_RES, resItems, resSel); y += 42;
+        Row(1, y, L"Proporción de la imagen (experimental)", L"Más campo de visión a los lados; algunos ángulos de cámara aún fallan."); ComboRight(1, y, ID_PANO, panoItems, panoSel); y += 42;
+        { std::string aa = ini.Get("suavizado", "fxaa");
+          Row(1, y, L"Suavizado de bordes", L"Quita los dientes de sierra. SMAA lo hace sin emborronar textos, notas ni cuerdas.");
+          ComboRight(1, y, ID_AA, { L"FXAA", L"SMAA (más nítido)", L"Desactivado" }, aa == "no" ? 2 : aa == "smaa" ? 1 : 0); y += 42; }
+        Row(1, y, L"Filtrado de texturas", L"Texturas nítidas en ángulo (suelo, mástil)."); ComboRight(1, y, ID_ANISO, { L"Anisotrópico 16x", L"Anisotrópico 8x", L"Anisotrópico 4x", L"Trilineal (consola)" },
+              an == "8" ? 1 : an == "4" ? 2 : an == "1" ? 3 : 0); y += 42;
+        Row(1, y, L"Nitidez", L"Realce de detalle (CAS)."); ComboRight(1, y, ID_SHARP, { L"Desactivada", L"Suave", L"Media (recomendada)", L"Alta" }, ni == "0" ? 0 : ni == "0.25" ? 1 : ni == "0.7" ? 3 : 2); y += 42;
+        Row(1, y, L"Desenfoque de movimiento", L"Como en la consola."); ToggleRight(1, y, ID_MBLUR, flag("desenfoque_movimiento", true)); y += 42;
+        Row(1, y, L"Grano de película", L"Como en la consola."); ToggleRight(1, y, ID_GRAIN, flag("grano_pelicula", false)); y += 44;
+        y = Section(1, y, L"PANTALLA");
+        Row(1, y, L"Pantalla completa al arrancar", L"Sin bordes. F11 o Alt+Intro la alternan en el juego."); ToggleRight(1, y, ID_FULLSCREEN, flag("pantalla_completa", false)); y += 42;
+        Row(1, y, L"Tamaño de la ventana", L"Solo en modo ventana; en pantalla completa se usa el monitor."); ComboRight(1, y, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4], kWinSizes[5], kWinSizes[6], kWinSizes[7], kWinSizes[8] }, ws); y += 42;
+        Row(1, y, L"Escalado de la imagen", L"Cómo se adapta la imagen a la ventana."); ComboRight(1, y, ID_SCALE, { L"Nítido (Catmull-Rom)", L"Suave (bilineal)" }, ini.Get("escalado") == "bilineal" ? 1 : 0); y += 42;
+        Row(1, y, L"Sincronización vertical (VSync)", L"Evita el desgarro de la imagen."); ToggleRight(1, y, ID_VSYNC, flag("vsync", true)); y += 42;
+        Row(1, y, L"Contador de FPS", L"Se muestra y oculta con F3."); ToggleRight(1, y, ID_FPS, flag("mostrar_fps", false));
+    }
+
+    // ---- Controles ----
+    {
+        int y = Section(2, kY0, L"JUGADORES");
+        Label(2, L"JUGADOR", kX0, y, 100, 18, 0, true, g.fontSmall); Label(2, L"INSTRUMENTO", kX0 + 110, y, 180, 18, 0, true, g.fontSmall);
+        Label(2, L"MANDO", kX0 + 300, y, 180, 18, 0, true, g.fontSmall); Label(2, L"ESTADO", kX0 + 492, y, 300, 18, 0, true, g.fontSmall); y += 22;
+        std::string def1 = ini.Get("mando_instrumento", "guitarra");
+        const char* instDef[4] = { def1.c_str(), "guitarra", "bateria", "voz" };
+        std::vector<std::wstring> padItems = { L"Mando XInput 1", L"Mando XInput 2", L"Mando XInput 3", L"Mando XInput 4", L"Ninguno" };
+        for (int p = 0; p < 4; p++)
+        {
+            char k[40]; snprintf(k, sizeof(k), "jugador%d_instrumento", p + 1);
+            std::string in = ini.Get(k, instDef[p]); int is = in == "bateria" ? 1 : in == "voz" ? 2 : 0;
+            snprintf(k, sizeof(k), "jugador%d_xinput", p + 1);
+            int x = atoi(ini.Get(k, std::to_string(p + 1)).c_str());
+            wchar_t lbl[16]; swprintf(lbl, 16, L"Jugador %d", p + 1);
+            Label(2, lbl, kX0, y + 5, 100, 22, 0, false, g.fontBold);
+            Combo(2, kX0 + 110, y, 180, ID_INST0 + p, { L"Guitarra", L"Batería", L"Voz" }, is);
+            Combo(2, kX0 + 300, y, 180, ID_PAD0 + p, padItems, x >= 1 && x <= 4 ? x - 1 : 4);
+            Label(2, L"", kX0 + 492, y + 6, kXR - kX0 - 492, 20, ID_STATUS0 + p, true, g.fontSmall);
+            y += 36;
+        }
+        std::vector<std::wstring> players = { L"Jugador 1", L"Jugador 2", L"Jugador 3", L"Jugador 4" };
+        Label(2, L"Teclado", kX0, y + 5, 100, 22);
+        Combo(2, kX0 + 110, y, 180, ID_KBD, players, atoi(ini.Get("teclado_jugador", "1").c_str()) - 1);
+        Label(2, L"Mando PlayStation", kX0 + 300, y + 5, 150, 22);
+        Combo(2, kX0 + 452, y, 180, ID_PS, players, atoi(ini.Get("mando_ps_jugador", "1").c_str()) - 1); y += 40;
+        Label(2, L"Mando normal (sin convertirlo en guitarra o batería)", kX0, y + 5, 400, 22);
+        Toggle(2, L"", kX0 + 452, y + 2, 84, ID_PADMODE, ini.Get("mando_modo", "guitarra") == "mando");
+        Button(2, L"Informe de mandos", kXR - 190, y, 190, 30, ID_DIAG); y += 40;
+        y = Section(2, y, L"BOTONES");
+        Combo(2, kX0, y, 150, ID_MAPSET, { L"Guitarra", L"Batería" }, 0);
+        Combo(2, kX0 + 160, y, 210, ID_MAPPLAYER, { L"Todos los jugadores", L"Solo jugador 1", L"Solo jugador 2", L"Solo jugador 3", L"Solo jugador 4" }, 0);
+        Button(2, L"Asignar...", kX0 + 382, y, 110, 30, ID_ASSIGN);
+        Button(2, L"Añadir...", kX0 + 502, y, 100, 30, ID_ADD);
+        Button(2, L"Preajustes", kXR - 120, y, 120, 30, ID_RESET); y += 40;
+        List(2, kX0, y, 404, kPanelBottom - 14 - y, ID_MAPLIST, WS_TABSTOP);
+        Label(2, L"Probar", kX0 + 420, y + 5, 70, 22, 0, true);
+        Combo(2, kX0 + 496, y, 170, ID_TESTPLAYER, players, 0);
+        Make(2, L"STATIC", L"", SS_OWNERDRAW, kX0 + 420, y + 40, kXR - kX0 - 420, kPanelBottom - 14 - y - 40, ID_TESTPANEL);
+        FillMapList();
+    }
+
+    // ---- Audio (latencia y microfono) ----
+    {
+        std::string al = ini.Get("latencia_audio", "normal");
+        int y = Section(3, kY0, L"SONIDO");
+        Row(3, y, L"Latencia del audio", L"Baja puede dar algún chasquido en las cargas; Segura para PCs lentos."); ComboRight(3, y, ID_AUDIOLAT, { L"Baja (~40 ms)", L"Normal (~55 ms)", L"Segura (~95 ms)" }, al == "baja" ? 0 : al == "segura" ? 2 : 1); y += 42;
+        Label(3, L"Para que notas y música coincidan, calibra una vez en el juego: Options > Calibrate Lag > Calibrate.", kX0, y, kXR - kX0, 18, 0, true, g.fontSmall); y += 32;
+        y = Section(3, y, L"MICRÓFONO");
+        g.mics.clear(); MicListDevices(g.mics);
+        std::vector<std::wstring> micItems = { L"Predeterminado de Windows" }; int ms = 0;
+        std::string devIni = ini.Get("microfono_dispositivo");
+        for (size_t i = 0; i < g.mics.size(); i++) { micItems.push_back(g.mics[i].second); if (!devIni.empty() && A(g.mics[i].first, CP_UTF8) == devIni) ms = (int)i + 1; }
+        Row(3, y, L"Micrófono de Windows", L"Hace de micrófono USB de la consola para la voz."); ToggleRight(3, y, ID_MIC_ON, flag("microfono", true)); y += 42;
+        Row(3, y, L"Dispositivo", L""); ComboRight(3, y, ID_MIC_DEV, micItems, ms, 440); y += 42;
+        Row(3, y, L"Ganancia", L"Si la barra apenas se mueve al cantar, súbela; si llega al rojo, bájala.", 420);
+        Label(3, L"x 1.00", kXR - 72, y + 9, 72, 22, ID_MIC_GAINLBL);
+        HWND tb = Make(3, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP | WS_CLIPSIBLINGS, kXR - 380, y + 4, 300, 30, ID_MIC_GAIN);
+        SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELPARAM(25, 400)); SendMessageW(tb, TBM_SETPAGESIZE, 0, 10);
+        SendMessageW(tb, TBM_SETPOS, TRUE, (LPARAM)std::clamp((int)lround(atof(ini.Get("microfono_ganancia", "1.0").c_str()) * 100), 25, 400));
+        y += 46;
+        Label(3, L"Nivel (habla o canta para probarlo)", kX0, y, 400, 21); y += 26;
+        Make(3, L"STATIC", L"", SS_OWNERDRAW, kX0, y, kXR - kX0, 32, ID_MIC_METER); y += 42;
+        Label(3, L"El micrófono se asigna al primer jugador con instrumento Voz (página CONTROLES).", kX0, y, kXR - kX0, 18, 0, true, g.fontSmall);
+    }
+
+    // ---- En linea (sesion 27): online P2P sin servidores ----
     {
         char un[64] = {}; DWORD unl = sizeof(un); GetUserNameA(un, &unl); un[15] = 0;
-        Label(6, L"Juego en línea (experimental)", 204, 98, 400, 22, 0, false, g.fontBold);
-        Toggle(6, L"Activar el juego en línea con otros jugadores de esta versión para PC", 204, 126, 640, ID_NET_ON, flag("online", false));
-        Label(6, L"Tu nombre", 204, 172, 150, 22);
-        SendMessageW(Edit(6, W(ini.Get("online_nombre", un)), 380, 168, 240, ID_NET_NAME), EM_SETLIMITTEXT, 15, 0);
-        Label(6, L"Tu código de sala", 204, 212, 170, 22);
-        SendMessageW(Edit(6, L"", 380, 208, 240, ID_NET_CODE), EM_SETREADONLY, TRUE, 0);
-        Button(6, L"Copiar", 630, 207, 100, 28, ID_NET_COPY);
-        Label(6, L"Activa el juego en línea para ver tu código.", 204, 244, 656, 44, ID_NET_STATUS, true);
-        Label(6, L"Códigos de tus amigos (separados por comas)", 204, 294, 500, 22);
-        Edit(6, W(ini.Get("online_amigos")), 204, 320, 656, ID_NET_PEERS);
-        Label(6, L"Cómo jugar: abrid el juego con esto activado, entrad en Quickplay+ y pulsad FIND Xbox LIVE PLAYERS\n"
-                 L"(botón naranja). El juego os junta solo y elegís canciones por turnos.\n"
-                 L"En la misma red (o en una LAN virtual) no hace falta código. Por internet, pasa tu código a tu amigo\n"
-                 L"y pon el suyo aquí. Solo se pueden tocar las canciones y DLC que tengáis todos.\n"
-                 L"No hay servidores: la conexión va directa entre vuestros PCs. Windows puede pedir permiso al\n"
-                 L"cortafuegos la primera vez (acepta en redes privadas).", 204, 360, 660, 140, 0, true);
+        int y = Section(6, kY0, L"JUEGO EN LÍNEA (EXPERIMENTAL)");
+        Row(6, y, L"Activar el juego en línea", L"Con otros jugadores de esta versión para PC. Sin servidores: conexión directa."); ToggleRight(6, y, ID_NET_ON, flag("online", false)); y += 44;
+        Row(6, y, L"Tu nombre", L"Hasta 15 letras.", 360); SendMessageW(Edit(6, W(ini.Get("online_nombre", un)), kXR - 280, y + 4, 280, ID_NET_NAME), EM_SETLIMITTEXT, 15, 0); y += 44;
+        Row(6, y, L"Tu código de sala", L"Pásaselo a tu amigo para encontrarte por internet.", 360);
+        SendMessageW(Edit(6, L"", kXR - 400, y + 4, 280, ID_NET_CODE), EM_SETREADONLY, TRUE, 0);
+        Button(6, L"Copiar", kXR - 110, y + 4, 110, 30, ID_NET_COPY); y += 46;
+        Label(6, L"Activa el juego en línea para ver tu código.", kX0, y, kXR - kX0, 40, ID_NET_STATUS, true, g.fontSmall); y += 44;
+        Row(6, y, L"Códigos de tus amigos", L"Separados por comas. En la misma red o en una LAN virtual no hacen falta."); y += 42;
+        Edit(6, W(ini.Get("online_amigos")), kX0, y, kXR - kX0, ID_NET_PEERS); y += 44;
+        y = Section(6, y, L"CÓMO JUGAR");
+        Label(6, L"1. Abrid el juego con el juego en línea activado.\n"
+                 L"2. Entrad en Quickplay+ y pulsad FIND Xbox LIVE PLAYERS (botón naranja): el juego os junta solo.\n"
+                 L"3. Elegís canciones por turnos. Solo se pueden tocar las canciones y DLC que tengáis todos.\n"
+                 L"Windows puede pedir permiso al cortafuegos la primera vez (acepta en redes privadas).", kX0, y, kXR - kX0, 90, 0, true, g.fontSmall);
     }
-    // Logros (sesion 25): la lista la escribe el juego en la carpeta de partidas (logros_lista.txt)
-    Label(5, L"Logros", 204, 98, 200, 22, 0, false, g.fontBold);
-    Label(5, L"", 300, 98, 560, 22, ID_ACHINFO, true);
-    Make(5, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | WS_VSCROLL | LBS_NOINTEGRALHEIGHT, 204, 128, 656, 384, ID_ACHLIST);
-    Toggle(-1, L"Mostrar este launcher al iniciar", 22, 534, 300, ID_SHOWLAUNCHER, flag("mostrar_launcher", true));
-    Label(-1, L"", 330, 538, 200, 22, ID_SAVED, true);
-    Button(-1, L"Guardar", 540, 528, 100, 40, ID_SAVE);
-    Button(-1, L"Salir", 650, 528, 90, 40, ID_EXIT);
-    Button(-1, L"▶  JUGAR", 750, 528, 112, 40, ID_PLAY);
-    // Juego
-    Label(0, L"ISO del juego (Xbox 360)", 204, 98, 400, 22, 0, false, g.fontBold);
-    Edit(0, W(ini.Get("iso")), 204, 124, 526, ID_ISO);
-    Button(0, L"Examinar...", 740, 123, 120, 28, ID_ISO_BROWSE);
-    Label(0, L"Carpeta de DLC", 204, 168, 400, 22, 0, false, g.fontBold);
-    Edit(0, W(ini.Get("dlc", ExeDir() + "\\dlc")), 204, 194, 526, ID_DLC);
-    Button(0, L"Examinar...", 740, 193, 120, 28, ID_DLC_BROWSE);
-    Label(0, L"", 204, 226, 650, 22, ID_DLCCOUNT, true);
-    Toggle(0, L"Saltar el vídeo de logos al arrancar", 204, 266, 420, ID_SKIPINTRO, flag("saltar_intro", true));
-    Label(0, L"Partidas", 204, 306, 200, 22, 0, false, g.fontBold);
-    Label(0, L"", 300, 306, 560, 22, ID_SAVEINFO, true);
-    Button(0, L"Abrir carpeta", 204, 334, 140, 28, ID_SAVEOPEN);
-    Button(0, L"Empezar de cero", 352, 334, 160, 28, ID_SAVERESET);
-    Button(0, L"Restaurar respaldo", 520, 334, 170, 28, ID_SAVERESTORE);
-    Label(0, L"Actualizaciones", 204, 390, 200, 22, 0, false, g.fontBold);
-    Label(0, L"", 204, 416, 656, 22, ID_UPDINFO, true);
-    Button(0, L"Buscar actualizaciones", 204, 444, 220, 30, ID_UPDCHECK);
-    Toggle(0, L"Buscar al abrir el launcher", 440, 446, 300, ID_UPDAUTO, flag("actualizar_al_abrir", true));
-    // Ayuda
-    Label(4, L"Teclas durante el juego", 204, 98, 400, 22, 0, false, g.fontBold);
-    Label(4, L"F11 o Alt+Enter: pantalla completa      F12: captura de pantalla (shot_9xx.bmp)\n"
-             L"F6: cambia el instrumento del jugador del teclado (guitarra, batería, voz)\n"
-             L"Teclado: flechas, Enter = Start, Retroceso = poder estrella, Espacio/1 = verde, Esc/2 = rojo,\n"
-             L"3 = amarillo, 4 = azul, 5 = naranja (en batería 5 = platillo naranja, K o B = bombo), Q/E = gatillos",
-          204, 124, 660, 92, 0, true);
-    Label(4, L"Varios jugadores", 204, 230, 400, 22, 0, false, g.fontBold);
-    Label(4, L"Cada mando es un jugador; elige su instrumento en Controles. Los jugadores 2 a 4 entran como\n"
-             L"invitados: en el aviso de perfil elige \"Continue without saving\". La voz usa el micrófono de Windows.", 204, 256, 660, 46, 0, true);
-    Label(4, L"Sincronía", 204, 314, 400, 22, 0, false, g.fontBold);
-    Label(4, L"Calibra una vez en el juego: Options > Calibrate Lag > Calibrate.", 204, 340, 660, 22, 0, true);
-    Label(4, L"Archivos", 204, 378, 400, 22, 0, false, g.fontBold);
-    Label(4, L"gh6.ini: toda la configuración (lo que cambias aquí).  gh6.log: registro de la última partida.\n"
-             L"Carpeta de partidas: partidas, DLC importado y respaldos. Consérvala (y gh6.ini) al actualizar a mano.\n"
-             L"Para entrar directo al juego desactiva \"Mostrar este launcher al iniciar\"; Mayús al abrir lo muestra.",
-          204, 404, 660, 92, 0, true);
-    // Graficos
-    int ws = 0; std::string v = ini.Get("ventana", "1280x720");
-    for (int i = 0; i < kNumWinSizes; i++) if (v == kWinSizesIni[i]) ws = i;
-    Toggle(1, L"Pantalla completa al arrancar", 204, 94, 420, ID_FULLSCREEN, flag("pantalla_completa", false));
-    Label(1, L"Tamaño de la ventana", 204, 130, 190, 22);
-    Combo(1, 400, 126, 200, ID_WINSIZE, { kWinSizes[0], kWinSizes[1], kWinSizes[2], kWinSizes[3], kWinSizes[4], kWinSizes[5], kWinSizes[6], kWinSizes[7], kWinSizes[8] }, ws);
-    Label(1, L"Escalado de imagen", 204, 164, 190, 22);
-    Combo(1, 400, 160, 200, ID_SCALE, { L"Nítido (Catmull-Rom)", L"Suave (bilineal)" }, ini.Get("escalado") == "bilineal" ? 1 : 0);
-    {   // Sesion 25: resolucion interna (el juego se dibuja a 720p en la consola)
-        std::string rs = ini.Get("resolucion_interna", "1");
-        Label(1, L"Resolución interna", 624, 130, 240, 22);
-        Combo(1, 624, 160, 240, ID_RES, { L"720p (como la consola)", L"1440p (2x, recomendada)", L"2160p / 4K (3x, PC potente)" }, rs == "2" ? 1 : rs == "3" ? 2 : 0);
-        std::string pn = ini.Get("panoramico", "16:9");
-        Label(1, L"Proporción (experimental)", 640, 330, 224, 22);
-        Combo(1, 640, 356, 224, ID_PANO, { L"16:9 (como la consola)", L"Panorámica del monitor (exp.)", L"21:9 (experimental)", L"32:9 (experimental)" }, pn == "auto" ? 1 : pn == "21:9" ? 2 : pn == "32:9" ? 3 : 0);
-    }
-    Label(1, L"Suavizado de bordes", 204, 198, 190, 22);
-    Combo(1, 400, 194, 260, ID_AA, { L"FXAA (quita los dientes de sierra)", L"Desactivado" }, ini.Get("suavizado", "fxaa") == "no" ? 1 : 0);
-    std::string an = ini.Get("anisotropico", "16");
-    Label(1, L"Filtrado de texturas", 204, 232, 190, 22);
-    Combo(1, 400, 228, 260, ID_ANISO, { L"Anisotrópico 16x (recomendado)", L"Anisotrópico 8x", L"Anisotrópico 4x", L"Trilineal (como la consola)" },
-          an == "8" ? 1 : an == "4" ? 2 : an == "1" ? 3 : 0);
-    std::string ni = ini.Get("nitidez", "0.4");
-    Label(1, L"Nitidez", 204, 266, 190, 22);
-    Combo(1, 400, 262, 260, ID_SHARP, { L"Desactivada", L"Suave", L"Media (recomendada)", L"Alta" },
-          ni == "0" ? 0 : ni == "0.25" ? 1 : ni == "0.7" ? 3 : 2);
-    Toggle(1, L"Sincronización vertical (VSync)", 204, 298, 420, ID_VSYNC, flag("vsync", true));
-    Toggle(1, L"Contador de FPS (F3)", 640, 298, 222, ID_FPS, flag("mostrar_fps", false));
-    Toggle(1, L"Desenfoque de movimiento (como la consola)", 204, 328, 420, ID_MBLUR, flag("desenfoque_movimiento", true));
-    Toggle(1, L"Grano de película (como la consola)", 204, 358, 420, ID_GRAIN, flag("grano_pelicula", false));
-    std::string al = ini.Get("latencia_audio", "normal");
-    Label(1, L"Latencia del audio", 204, 398, 190, 22, 0, false, g.fontBold);
-    Combo(1, 400, 394, 260, ID_AUDIOLAT, { L"Baja (~40 ms)", L"Normal (~55 ms)", L"Segura (~95 ms, PCs lentos)" }, al == "baja" ? 0 : al == "segura" ? 2 : 1);
-    Label(1, L"Baja puede dar algún chasquido en las cargas. Para que notas y música coincidan, calibra una vez\n"
-             L"en el juego: Options > Calibrate Lag > Calibrate (vídeo: toca cuando la nota pase por la línea;\n"
-             L"audio: toca con los golpes).", 204, 430, 660, 70, 0, true);
-    // Controles
-    Label(2, L"Jugador", 204, 96, 80, 22, 0, true); Label(2, L"Instrumento", 290, 96, 130, 22, 0, true);
-    Label(2, L"Mando", 432, 96, 140, 22, 0, true); Label(2, L"Estado", 584, 96, 200, 22, 0, true);
-    std::string def1 = ini.Get("mando_instrumento", "guitarra");
-    const char* instDef[4] = { def1.c_str(), "guitarra", "bateria", "voz" };
-    std::vector<std::wstring> padItems = { L"Mando XInput 1", L"Mando XInput 2", L"Mando XInput 3", L"Mando XInput 4", L"Ninguno" };
-    for (int p = 0; p < 4; p++)
+
+    // ---- Logros (sesion 25): la lista la escribe el juego en la carpeta de partidas (logros_lista.txt) ----
     {
-        char k[40]; snprintf(k, sizeof(k), "jugador%d_instrumento", p + 1);
-        std::string in = ini.Get(k, instDef[p]); int is = in == "bateria" ? 1 : in == "voz" ? 2 : 0;
-        snprintf(k, sizeof(k), "jugador%d_xinput", p + 1);
-        int x = atoi(ini.Get(k, std::to_string(p + 1)).c_str());
-        wchar_t lbl[16]; swprintf(lbl, 16, L"Jugador %d", p + 1);
-        Label(2, lbl, 204, 124 + p * 32, 80, 22, 0, false, g.fontBold);
-        Combo(2, 290, 120 + p * 32, 132, ID_INST0 + p, { L"Guitarra", L"Batería", L"Voz" }, is);
-        Combo(2, 432, 120 + p * 32, 142, ID_PAD0 + p, padItems, x >= 1 && x <= 4 ? x - 1 : 4);
-        Label(2, L"", 584, 124 + p * 32, 280, 22, ID_STATUS0 + p, true);
+        int y = Section(5, kY0, L"LOGROS");
+        Label(5, L"", kX0, y, kXR - kX0, 20, ID_ACHINFO, true, g.fontSmall); y += 28;
+        List(5, kX0, y, kXR - kX0, kPanelBottom - 14 - y, ID_ACHLIST, 0);
     }
-    std::vector<std::wstring> players = { L"Jugador 1", L"Jugador 2", L"Jugador 3", L"Jugador 4" };
-    Label(2, L"Teclado", 204, 258, 80, 22);
-    Combo(2, 290, 254, 132, ID_KBD, players, atoi(ini.Get("teclado_jugador", "1").c_str()) - 1);
-    Label(2, L"Mando PlayStation", 432, 258, 140, 22);
-    Combo(2, 584, 254, 132, ID_PS, players, atoi(ini.Get("mando_ps_jugador", "1").c_str()) - 1);
-    Toggle(2, L"Mando normal (sin convertirlo en guitarra o batería)", 204, 288, 460, ID_PADMODE, ini.Get("mando_modo", "guitarra") == "mando");
-    Button(2, L"Informe de mandos", 690, 287, 172, 28, ID_DIAG);
-    Label(2, L"Botones de", 204, 328, 90, 22, 0, false, g.fontBold);
-    Combo(2, 290, 324, 132, ID_MAPSET, { L"Guitarra", L"Batería" }, 0);
-    Combo(2, 432, 324, 150, ID_MAPPLAYER, { L"Todos los jugadores", L"Solo jugador 1", L"Solo jugador 2", L"Solo jugador 3", L"Solo jugador 4" }, 0);
-    Button(2, L"Asignar...", 592, 323, 88, 28, ID_ASSIGN);
-    Button(2, L"Añadir...", 686, 323, 80, 28, ID_ADD);
-    Button(2, L"Preajustes", 772, 323, 90, 28, ID_RESET);
-    HWND list = Make(2, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP | LBS_NOINTEGRALHEIGHT, 204, 360, 330, 150, ID_MAPLIST);
-    SetWindowTheme(list, L"DarkMode_Explorer", nullptr);
-    Label(2, L"Probar", 548, 362, 60, 22, 0, true);
-    Combo(2, 610, 358, 130, ID_TESTPLAYER, players, 0);
-    Make(2, L"STATIC", L"", SS_OWNERDRAW, 548, 390, 314, 120, ID_TESTPANEL);
-    FillMapList();
-    // Microfono
-    g.mics.clear(); MicListDevices(g.mics);
-    std::vector<std::wstring> micItems = { L"Predeterminado de Windows" }; int ms = 0;
-    std::string devIni = ini.Get("microfono_dispositivo");
-    for (size_t i = 0; i < g.mics.size(); i++) { micItems.push_back(g.mics[i].second); if (!devIni.empty() && A(g.mics[i].first, CP_UTF8) == devIni) ms = (int)i + 1; }
-    Toggle(3, L"Usar un micrófono de Windows como micrófono USB de la consola", 204, 100, 560, ID_MIC_ON, flag("microfono", true));
-    Label(3, L"Dispositivo", 204, 148, 120, 22);
-    Combo(3, 330, 144, 530, ID_MIC_DEV, micItems, ms);
-    Label(3, L"Ganancia", 204, 192, 120, 22);
-    HWND tb = Make(3, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP, 326, 188, 430, 30, ID_MIC_GAIN);
-    SendMessageW(tb, TBM_SETRANGE, TRUE, MAKELPARAM(25, 400)); SendMessageW(tb, TBM_SETPAGESIZE, 0, 10);
-    SendMessageW(tb, TBM_SETPOS, TRUE, (LPARAM)std::clamp((int)lround(atof(ini.Get("microfono_ganancia", "1.0").c_str()) * 100), 25, 400));
-    Label(3, L"", 766, 192, 90, 22, ID_MIC_GAINLBL);
-    Label(3, L"Nivel (habla o canta para probarlo)", 204, 240, 400, 22, 0, false, g.fontBold);
-    Make(3, L"STATIC", L"", SS_OWNERDRAW, 204, 266, 656, 30, ID_MIC_METER);
-    Label(3, L"El micrófono se asigna al primer jugador con instrumento Voz (pestaña Controles).\n"
-             L"Si la barra apenas se mueve al cantar, sube la ganancia; si llega al rojo, bájala.", 204, 312, 660, 50, 0, true);
+
+    // ---- Ayuda ----
+    {
+        int y = Section(4, kY0, L"TECLAS DURANTE EL JUEGO");
+        Label(4, L"F11 o Alt+Intro: pantalla completa  ·  F3: contador de FPS  ·  F12: captura (shot_9xx.bmp)\n"
+                 L"F6: cambia el instrumento del jugador del teclado (guitarra, batería, voz)\n"
+                 L"Teclado: flechas, Intro = Start, Retroceso = poder estrella, Espacio/1 = verde, Esc/2 = rojo, 3 = amarillo,\n"
+                 L"4 = azul, 5 = naranja (en batería 5 = platillo naranja, K o B = bombo), Q/E = gatillos", kX0, y, kXR - kX0, 84, 0, true, g.fontSmall); y += 92;
+        y = Section(4, y, L"VARIOS JUGADORES");
+        Label(4, L"Cada mando es un jugador; elige su instrumento en CONTROLES. Los jugadores 2 a 4 entran como invitados:\n"
+                 L"en el aviso de perfil elige \"Continue without saving\". La voz usa el micrófono de Windows.", kX0, y, kXR - kX0, 44, 0, true, g.fontSmall); y += 52;
+        y = Section(4, y, L"SINCRONÍA");
+        Label(4, L"Calibra una vez en el juego: Options > Calibrate Lag > Calibrate.", kX0, y, kXR - kX0, 22, 0, true, g.fontSmall); y += 30;
+        y = Section(4, y, L"ARCHIVOS");
+        Label(4, L"gh6.ini: toda la configuración (lo que cambias aquí).  gh6.log: registro de la última partida.\n"
+                 L"Carpeta de partidas: partidas, DLC importado y respaldos. Consérvala (y gh6.ini) al actualizar a mano.\n"
+                 L"portada.jpg / .png / .bmp junto al ejecutable: imagen propia para la portada de INICIO (p. ej. un hero de SteamGridDB).", kX0, y, kXR - kX0, 64, 0, true, g.fontSmall);
+    }
     UpdateGainLabel(); UpdateDlcCount(); PollPads(); UpdateStatus();
+}
+// Inicio: estado del ISO y de la version
+HBITMAP DecodeImage(const std::vector<uint8_t>& d, int& w, int& h)
+{   // PNG (u otro formato de WIC) -> DIB de 32 bits
+    HBITMAP hb = nullptr; IWICImagingFactory* f = nullptr; IWICStream* s = nullptr; IWICBitmapDecoder* dec = nullptr; IWICBitmapFrameDecode* fr = nullptr; IWICFormatConverter* cv = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f))) && SUCCEEDED(f->CreateStream(&s))
+        && SUCCEEDED(s->InitializeFromMemory((BYTE*)d.data(), (DWORD)d.size())) && SUCCEEDED(f->CreateDecoderFromStream(s, nullptr, WICDecodeMetadataCacheOnLoad, &dec))
+        && SUCCEEDED(dec->GetFrame(0, &fr)) && SUCCEEDED(f->CreateFormatConverter(&cv))
+        && SUCCEEDED(cv->Initialize(fr, GUID_WICPixelFormat32bppBGR, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)))
+    {
+        UINT W = 0, H = 0; cv->GetSize(&W, &H);
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), (LONG)W, -(LONG)H, 1, 32, BI_RGB };
+        void* bits = nullptr; hb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (hb && bits && SUCCEEDED(cv->CopyPixels(nullptr, W * 4, W * H * 4, (BYTE*)bits))) { w = (int)W; h = (int)H; }
+        else if (hb) { DeleteObject(hb); hb = nullptr; }
+    }
+    for (IUnknown* u : std::initializer_list<IUnknown*>{ cv, fr, dec, s, f }) if (u) u->Release();
+    return hb;
+}
+// Logo oficial (data\memcard\ICON0.png del ISO del usuario): portada de Inicio e insignia de la barra lateral
+void LoadIsoLogo(const std::wstring& iso)
+{
+    if (iso.empty() || iso == g.logoIso) return;
+    g.logoIso = iso;
+    auto png = IsoExtract(A(iso), "data\\memcard\\ICON0.png");
+    if (png.empty()) return;
+    int w = 0, h = 0; HBITMAP b = DecodeImage(png, w, h);
+    if (!b) return;
+    if (g.logo) DeleteObject(g.logo);
+    g.logo = b; g.logoW = w; g.logoH = h;
+    {   // solo las letras: el fondo de fuego es naranja/marron (saturado) y las letras blancas, grises y negras (sin color)
+        DIBSECTION ds{}; GetObject(b, sizeof(ds), &ds);
+        const uint32_t* src = (const uint32_t*)ds.dsBm.bmBits;
+        int x0 = w * 40 / 320, x1 = w * 280 / 320, y1 = h * 168 / 176;   // zona del logo en ICON0 (320x176)
+        g.cutW = x1 - x0; g.cutH = y1; g.logoCut.assign((size_t)g.cutW * g.cutH, 0);
+        if (src)
+            for (int y = 0; y < g.cutH; y++)
+                for (int x = 0; x < g.cutW; x++)
+                {
+                    uint32_t c = src[y * w + x0 + x];
+                    int bl = c & 255, gr = (c >> 8) & 255, rd = (c >> 16) & 255, mx = std::max({ rd, gr, bl }), mn = std::min({ rd, gr, bl });
+                    float sat = mx ? (float)(mx - mn) / mx : 0.0f, t = std::clamp((sat - 0.25f) / 0.20f, 0.0f, 1.0f);
+                    float a = 1.0f - t * t * (3 - 2 * t);
+                    g.logoCut[y * g.cutW + x] = ((uint32_t)(a * 255 + 0.5f) << 24) | ((uint32_t)(rd * a + 0.5f) << 16) | ((uint32_t)(gr * a + 0.5f) << 8) | (uint32_t)(bl * a + 0.5f);
+                }
+        for (int k = 0; k < 2; k++) if (g.cutBmp[k]) { DeleteObject(g.cutBmp[k]); g.cutBmp[k] = nullptr; }
+    }
+    if (g.wnd) { InvalidateRect(g.wnd, nullptr, TRUE); InvalidateRect(Item(ID_BANNER), nullptr, FALSE); }
+}
+void UpdateHome()
+{
+    std::wstring iso = GetText(Item(ID_ISO));
+    if (GetFileAttributesW(iso.c_str()) != INVALID_FILE_ATTRIBUTES) LoadIsoLogo(iso);
+    g.isoMissing = iso.empty() || GetFileAttributesW(iso.c_str()) == INVALID_FILE_ATTRIBUTES;
+    std::wstring t = g.isoMissing ? L"Falta el ISO del juego: elígelo en la página JUEGO para poder jugar."
+                                  : L"ISO del juego: " + iso.substr(iso.find_last_of(L"\\/") + 1);
+    SetWindowTextW(Item(ID_HOME_ISO), t.c_str());
+    SetWindowTextW(Item(ID_HOME_UPD), GetText(Item(ID_UPDINFO)).c_str());
 }
 // Valores de la ventana -> gh6.ini
 bool Collect(bool requireIso)
@@ -821,7 +1232,7 @@ bool Collect(bool requireIso)
     ini.Set("mostrar_fps", Toggled(ID_FPS) ? "1" : "0");
     ini.Set("desenfoque_movimiento", Toggled(ID_MBLUR) ? "1" : "0");
     ini.Set("grano_pelicula", Toggled(ID_GRAIN) ? "1" : "0");
-    ini.Set("suavizado", Sel(ID_AA) == 1 ? "no" : "fxaa");
+    { static const char* aa[] = { "fxaa", "smaa", "no" }; ini.Set("suavizado", aa[std::clamp(Sel(ID_AA), 0, 2)]); }
     { static const char* an[] = { "16", "8", "4", "1" }; ini.Set("anisotropico", an[std::clamp(Sel(ID_ANISO), 0, 3)]); }
     { static const char* ni[] = { "0", "0.25", "0.4", "0.7" }; ini.Set("nitidez", ni[std::clamp(Sel(ID_SHARP), 0, 3)]); }
     { static const char* rr[] = { "1", "2", "3" }; ini.Set("resolucion_interna", rr[std::clamp(Sel(ID_RES), 0, 2)]); }
@@ -1004,7 +1415,7 @@ void RestoreSave()
 // ---- actualizaciones (updater.cpp en un hilo; los resultados llegan por mensajes) ----
 enum { WM_UPD_CHECKED = WM_APP + 1, WM_UPD_PROGRESS, WM_UPD_INSTALLED };
 std::string Repo() { return g.ini.Get("actualizar_repo", "Piscacho/Guitar-Hero-Warriors-of-Rock-PC"); }
-void SetUpdInfo(const std::wstring& t) { SetWindowTextW(Item(ID_UPDINFO), t.c_str()); }
+void SetUpdInfo(const std::wstring& t) { SetWindowTextW(Item(ID_UPDINFO), t.c_str()); SetWindowTextW(Item(ID_HOME_UPD), t.c_str()); }
 void StartUpdateCheck(bool automatic)
 {
     if (g.updBusy) return;
@@ -1068,16 +1479,19 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_PAINT: { PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps); PaintMain(dc); EndPaint(h, &ps); return 0; }
     case WM_ERASEBKGND: return 1;
     case WM_DRAWITEM: DrawItem((DRAWITEMSTRUCT*)l); return TRUE;
-    case WM_MEASUREITEM: ((MEASUREITEMSTRUCT*)l)->itemHeight = ((MEASUREITEMSTRUCT*)l)->CtlID == ID_ACHLIST ? S(46) : S(24); return TRUE;
+    case WM_MEASUREITEM: ((MEASUREITEMSTRUCT*)l)->itemHeight = ((MEASUREITEMSTRUCT*)l)->CtlID == ID_ACHLIST ? S(48) : S(28); return TRUE;
     case WM_CTLCOLORSTATIC:
-    {
-        HDC dc = (HDC)w; SetTextColor(dc, g.dimLabels.count((HWND)l) ? kDim : kText); SetBkColor(dc, kBg);
-        if ((HWND)l == Item(ID_SAVED)) SetTextColor(dc, kAccent2);
-        return (LRESULT)g.brBg;
+    {   // sesion 28: textos sobre el panel de contenido (o sobre la barra inferior el estado)
+        HDC dc = (HDC)w; HWND c = (HWND)l;
+        bool bar = c == Item(ID_SAVED), card = c == Item(ID_HOME_ISO) || c == Item(ID_HOME_UPD) || c == Item(ID_HOME_KEYS) || c == Item(ID_NET_CODE);   // (campo de solo lectura)
+        COLORREF col = g.dimLabels.count(c) ? kDim : kText;
+        if (bar || (c == Item(ID_HOME_ISO) && g.isoMissing)) col = kAccent2;
+        SetTextColor(dc, col); SetBkColor(dc, bar ? kBar : card ? kInput : kPanel);
+        return (LRESULT)(bar ? g.brBar : card ? g.brInput : g.brPanel);
     }
     case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX:
     { HDC dc = (HDC)w; SetTextColor(dc, kText); SetBkColor(dc, kInput); return (LRESULT)g.brInput; }
-    case WM_CTLCOLORBTN: return (LRESULT)g.brBg;
+    case WM_CTLCOLORBTN: return (LRESULT)g.brPanel;
     case WM_HSCROLL: if ((HWND)l == Item(ID_MIC_GAIN)) UpdateGainLabel(); return 0;
     case WM_UPD_CHECKED: OnUpdateChecked((UpdateInfo*)l); return 0;
     case WM_UPD_PROGRESS:
@@ -1121,7 +1535,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
         {
             g.toggles[c] = !g.toggles[c]; InvalidateRect(c, nullptr, TRUE);
             if (id == ID_MIC_ON) StartMeter();
-            if (id == ID_NET_ON && g.toggles[c]) NetLauncherStart();
+            // Inicio repite pantalla completa y juego en linea: los dos interruptores van a la par
+            static const int pairs[][2] = { { ID_Q_FULL, ID_FULLSCREEN }, { ID_Q_NET, ID_NET_ON } };
+            for (auto& pr : pairs) for (int k = 0; k < 2; k++) if (id == pr[k]) { HWND o = Item(pr[1 - k]); g.toggles[o] = g.toggles[c]; InvalidateRect(o, nullptr, TRUE); }
+            if ((id == ID_NET_ON || id == ID_Q_NET) && g.toggles[c]) NetLauncherStart();
             return 0;
         }
         if (id >= ID_TAB0 && id < ID_TAB0 + kTabs && code == BN_CLICKED) { ShowTab(id - ID_TAB0); return 0; }
@@ -1211,6 +1628,14 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         }
         case ID_MIC_DEV: if (code == CBN_SELCHANGE) StartMeter(); return 0;
+        case ID_Q_RES: case ID_RES: case ID_Q_PANO: case ID_PANO:
+            if (code == CBN_SELCHANGE)
+            {   // Inicio repite resolucion interna y proporcion
+                int other = id == ID_Q_RES ? ID_RES : id == ID_RES ? ID_Q_RES : id == ID_Q_PANO ? ID_PANO : ID_Q_PANO;
+                SendMessageW(Item(other), CB_SETCURSEL, Sel(id), 0);
+            }
+            return 0;
+        case ID_ISO: if (code == EN_CHANGE) UpdateHome(); return 0;
         case ID_KBD: case ID_PS: case ID_PAD0: case ID_PAD0 + 1: case ID_PAD0 + 2: case ID_PAD0 + 3: if (code == CBN_SELCHANGE) UpdateStatus(); return 0;
         }
         break;
@@ -1249,22 +1674,45 @@ bool RunLauncherUI()
     };
     loadMap(g_guitar, kGuitarN); loadMap(g_drum, kDrumN);
     auto font = [](int pt, int weight, const wchar_t* face) { return CreateFontW(-S(pt), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, face); };
-    g.font = font(14, FW_NORMAL, L"Segoe UI"); g.fontBold = font(14, FW_SEMIBOLD, L"Segoe UI"); g.fontSmall = font(12, FW_NORMAL, L"Segoe UI");
-    g.fontTitle = font(34, FW_BLACK, L"Segoe UI Black"); g.fontSub = font(14, FW_SEMIBOLD, L"Segoe UI");
-    g.fontTab = font(15, FW_SEMIBOLD, L"Segoe UI"); g.fontIcon = font(18, FW_NORMAL, L"Segoe MDL2 Assets");
+    const wchar_t* face = L"Bahnschrift";   // sesion 28: como el launcher de Dead Space
+    g.font = font(14, FW_NORMAL, face); g.fontBold = font(14, FW_SEMIBOLD, face); g.fontSmall = font(12, FW_NORMAL, face);
+    g.fontTitle = font(31, FW_BOLD, face); g.fontSub = font(12, FW_SEMIBOLD, face); g.fontHead = font(15, FW_SEMIBOLD, face);
+    g.fontTab = font(14, FW_SEMIBOLD, face); g.fontPlay = font(21, FW_BOLD, face); g.fontBanner = font(62, FW_BOLD, face);
+    g.fontIcon = font(18, FW_NORMAL, L"Segoe MDL2 Assets");
     g.brBg = CreateSolidBrush(kBg); g.brInput = CreateSolidBrush(kInput); g.brSide = CreateSolidBrush(kSide);
+    g.brPanel = CreateSolidBrush(kPanel); g.brBar = CreateSolidBrush(kBar);
+    {   // selector < valor >
+        WNDCLASSW sc{}; sc.lpfnWndProc = SelProc; sc.hInstance = g.inst; sc.lpszClassName = L"GHSel"; sc.hCursor = LoadCursor(nullptr, IDC_HAND); sc.style = CS_DBLCLKS;
+        RegisterClassW(&sc);
+    }
+    for (const char* ext : { "png", "jpg", "jpeg", "bmp" })
+    {   // portada.<ext> junto al exe (opcional): imagen de la portada de Inicio (por ejemplo un "hero" de SteamGridDB)
+        if (g.banner) break;
+        FILE* f = fopen((ExeDir() + "\\portada." + ext).c_str(), "rb");
+        if (!f) continue;
+        std::vector<uint8_t> d; uint8_t buf[65536]; size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && d.size() < (64u << 20)) d.insert(d.end(), buf, buf + n);
+        fclose(f);
+        g.banner = DecodeImage(d, g.bannerW, g.bannerH);
+    }
+    if (const char* pg = getenv("GH6_LAUNCHER_PAGE")) g.tab = std::clamp(atoi(pg), 0, kTabs - 1);   // capturas de cada pagina
+    LoadIsoLogo(W(g.ini.Get("iso")));   // logo del juego desde el ISO del usuario (sesion 28)
     WNDCLASSW wc{}; wc.lpfnWndProc = WndProc; wc.hInstance = g.inst; wc.lpszClassName = L"GH6Launcher"; wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(g.inst, MAKEINTRESOURCEW(1)); wc.hbrBackground = g.brBg;
     RegisterClassW(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT r{ 0, 0, S(880), S(584) }; AdjustWindowRectExForDpi(&r, style, FALSE, 0, g.dpi);
+    RECT r{ 0, 0, S(kW), S(kH) }; AdjustWindowRectExForDpi(&r, style, FALSE, 0, g.dpi);
     int ww = r.right - r.left, wh = r.bottom - r.top;
     g.wnd = CreateWindowExW(0, wc.lpszClassName, L"Guitar Hero: Warriors of Rock - Launcher", style,
                             (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2, ww, wh, nullptr, nullptr, g.inst, nullptr);
     BOOL dark = TRUE; DwmSetWindowAttribute(g.wnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
+    COLORREF caption = kSide, border = kLine;
+    DwmSetWindowAttribute(g.wnd, 35 /* DWMWA_CAPTION_COLOR */, &caption, sizeof(caption));
+    DwmSetWindowAttribute(g.wnd, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
     BuildUi();
     UpdateSaveInfo();
     { wchar_t t[160]; swprintf(t, 160, L"Versión instalada: v%hs  ·  repositorio %hs", AppVersion(), Repo().c_str()); SetUpdInfo(t); }
+    ShowTab(g.tab);
     if (Toggled(ID_UPDAUTO) || getenv("GH6_UPDATE_API")) StartUpdateCheck(true);
     ShowWindow(g.wnd, SW_SHOW); UpdateWindow(g.wnd);
     SetTimer(g.wnd, 1, 33, nullptr);
@@ -1272,9 +1720,12 @@ bool RunLauncherUI()
     while (!g.done && GetMessageW(&msg, nullptr, 0, 0) > 0)
         if (!IsDialogMessageW(g.wnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     g.meter.Stop();
-    for (HFONT f : { g.font, g.fontBold, g.fontSmall, g.fontTitle, g.fontSub, g.fontTab, g.fontIcon }) DeleteObject(f);
-    UnregisterClassW(wc.lpszClassName, g.inst);
-    DeleteObject(g.brBg); DeleteObject(g.brInput); DeleteObject(g.brSide);
+    if (g.logo) DeleteObject(g.logo);
+    for (HBITMAP b : g.cutBmp) if (b) DeleteObject(b);
+    for (HFONT f : { g.font, g.fontBold, g.fontSmall, g.fontTitle, g.fontSub, g.fontTab, g.fontIcon, g.fontHead, g.fontPlay, g.fontBanner }) DeleteObject(f);
+    UnregisterClassW(wc.lpszClassName, g.inst); UnregisterClassW(L"GHSel", g.inst);
+    DeleteObject(g.brBg); DeleteObject(g.brInput); DeleteObject(g.brSide); DeleteObject(g.brPanel); DeleteObject(g.brBar);
+    if (g.banner) DeleteObject(g.banner);
     CoUninitialize();
     SetThreadDpiAwarenessContext(oldDpi);
     LOG("[launcher] ventana cerrada: %s", g.result ? "JUGAR" : "salir");

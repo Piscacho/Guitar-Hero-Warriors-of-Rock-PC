@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <windows.h>
 float GH6PanoAspect();   // gpu_d3d12.cpp (sesion 25): proporcion panoramica, 0 = 16:9
+float GH6PanoCameraAspect();   // sesion 28: 16:9 en los menus con la escena 3D comprimida
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
@@ -74,7 +75,8 @@ void StartGpuThreads()
             g_vblankCount++;
             {   // Sesion 25 (experimento panoramico): GH6_ASPECTO = proporcion de la camara del juego (global 829A2584, 16/9 por defecto)
 
-                static const float asp = getenv("GH6_ASPECTO") ? (float)atof(getenv("GH6_ASPECTO")) : GH6PanoAspect();
+                static const float aspFix = getenv("GH6_ASPECTO") ? (float)atof(getenv("GH6_ASPECTO")) : 0.0f;
+                const float asp = aspFix > 0 ? aspFix : GH6PanoCameraAspect();
                 if (asp > 0) { uint32_t want; memcpy(&want, &asp, 4); if (Load32(0x829A2584) != want && Load32(0x829A2584) != 0) Store32(0x829A2584, want); }
             }
             Store32(kD1ModeVblankStatus, 1);

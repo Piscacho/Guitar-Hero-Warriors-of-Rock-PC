@@ -22,3 +22,4 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
 
 // Estructura comun VS->PS (posicion + 16 interpoladores). El GS de rect lists la reutiliza.
 extern const char* kXenosInterfaceHlsl;
+std::string XenosInterface();   // con los anadidos del panoramico (sesion 27)

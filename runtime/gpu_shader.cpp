@@ -58,6 +58,20 @@ uint XSwap(uint v, uint e)
 }
 bool XBool(uint i) { return ((XB[i >> 7][(i >> 5) & 3] >> (i & 31)) & 1) != 0; }
 )";
+// Interfaz comun VS/GS/PS. Sesion 25 (panoramico): XScreen = escala de la superficie. Sesion 27: + "pano" (PANODIM), 1 = normal,
+// 0 = franja lateral del panoramico (el PS la pinta de negro). Sin panoramico el HLSL no cambia.
+std::string XenosInterface()
+{
+    std::string h = kXenosInterfaceHlsl;
+    static const bool pano = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
+    if (!pano) return h;
+    size_t q = h.find("uint4 XTexMode[16];");
+    if (q != std::string::npos) h.insert(h.find('\n', q) + 1, "    float4 XScreen;       // x, y = pixeles de superficie por pixel del juego; z = compresion de la interfaz (0 = no)\n");
+    q = h.find("float4 t[16] : TEXCOORD0; };");
+    if (q != std::string::npos) h.replace(q, 29, "float4 t[16] : TEXCOORD0; float pano : PANODIM; };");
+    return "#define XPANO_DIM 1\n" + h;
+}
+
 
 bool g_xlatNoGrad = false;   // sesion 24: retraduccion sin gradientes (ver GetShader de gpu_d3d12.cpp)
 namespace
@@ -543,10 +557,8 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
             return ts;
         }
     }
-    std::string h = kXenosInterfaceHlsl;
-    // Sesion 25 (panoramico): XScreen = escala de la superficie y compresion de la interfaz 2D (solo con GH6_PANORAMICO: a 16:9 el HLSL no cambia)
+    std::string h = XenosInterface();
     static const bool pano = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
-    if (pano) { size_t q = h.find("uint4 XTexMode[16];"); if (q != std::string::npos) h.insert(h.find('\n', q) + 1, "    float4 XScreen;       // x, y = pixeles de superficie por pixel del juego; z = compresion de la interfaz (0 = no)\n"); }
     if (!isPs)
     {
         static const bool panoV = getenv("GH6_PANORAMICO") && *getenv("GH6_PANORAMICO") && _stricmp(getenv("GH6_PANORAMICO"), "16:9") != 0;
@@ -572,7 +584,7 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
             // superficie; los vertices en los bordes (pases a pantalla completa, fondos) se quedan donde estan.
             size_t q = h.find("    PANO_UI\n");
             if (q != std::string::npos)
-                h.replace(q, 12, "");   // sesion 25: la compresion de la interfaz la hace el GS del panoramico, por triangulo
+                h.replace(q, 12, panoV ? "    o.pano = 1.0;\n" : "");   // sesion 25: la compresion la hace el GS; sesion 27: marca de oscurecer
                 (void)panoV;
         }
     }
@@ -619,6 +631,7 @@ TranslatedShader TranslateXenosShader(uint32_t type, const uint32_t* words, uint
         h += "    if (XAlpha.x < 7.5) { uint af = (uint)XAlpha.x; float aa = oC0.w, ar = XAlpha.y;\n"
              "        bool ap = af == 1 ? aa < ar : af == 2 ? aa == ar : af == 3 ? aa <= ar : af == 4 ? aa > ar : af == 5 ? aa != ar : af == 6 ? aa >= ar : false;\n"
              "        if (!ap) discard; }\n";
+        if (pano) h += "    oC0.rgb *= i.pano;\n";   // sesion 27: franjas laterales del panoramico en negro (0) o sin cambios (1)
         h += "    return XVte.w != 0 ? oC0 * XVte.w : oC0;\n}\n";
     }
     ts.hlsl = h;

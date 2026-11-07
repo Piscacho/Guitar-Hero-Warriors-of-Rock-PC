@@ -29,7 +29,7 @@ Controles
   Esc = rojo), Q/E = gatillos. En bateria: 5 = platillo naranja, K o B = bombo.
 
 Microfono
-Cualquier microfono de Windows hace de microfono USB de la consola (pestana Microfono: dispositivo,
+Cualquier microfono de Windows hace de microfono USB de la consola (pestana Audio: dispositivo,
 ganancia y medidor de nivel). Se asigna al primer jugador con instrumento Voz.
 
 Juego en linea (experimental)
@@ -45,7 +45,7 @@ Copia tus paquetes de contenido descargable de Xbox 360 (archivos LIVE/PIRS/CON,
 41560883\00000002\<archivo>) en la carpeta dlc (puede tener subcarpetas). Se importan solos al arrancar.
 
 Imagen
-En "Imagen y audio": suavizado de bordes (FXAA), filtrado de texturas (anisotropico 16x) y nitidez (CAS).
+En "Graficos": suavizado de bordes (SMAA o FXAA), filtrado de texturas (anisotropico 16x) y nitidez (CAS).
 Contador de FPS: F3 en el juego (o "Contador de FPS" en el launcher): FPS, tiempo por cuadro, retraso del audio y tirones.
 
 Sincronia

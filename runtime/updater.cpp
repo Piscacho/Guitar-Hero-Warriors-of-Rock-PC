@@ -15,7 +15,7 @@
 
 namespace fs = std::filesystem;
 
-const char* AppVersion() { return "1.4.0"; }   // mantener igual que project/gh6.rc
+const char* AppVersion() { return "1.5.0"; }   // mantener igual que project/gh6.rc
 
 namespace
 {

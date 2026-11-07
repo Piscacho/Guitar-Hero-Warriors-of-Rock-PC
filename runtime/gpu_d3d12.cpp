@@ -38,6 +38,10 @@ extern bool g_xlatNoGrad;   // gpu_shader.cpp (sesion 24)
 extern std::atomic<uint64_t> g_cpWaitUs;    // gpu_cp.cpp
 extern std::atomic<uint64_t> g_presentCalls, g_presentFallback;   // gpu_window.cpp
 extern std::atomic<uint64_t> g_vblankCount; // gpu_stub.cpp
+// SMAA (sesion 28): tablas y shader oficiales de iryoku/smaa (licencia MIT, runtime/smaa/LICENSE.txt)
+#include "smaa/AreaTex.h"
+#include "smaa/SearchTex.h"
+#include "smaa/smaa_hlsl.inc"
 namespace
 {
 constexpr UINT kFrames = 2;
@@ -104,6 +108,15 @@ uint64_t g_curPsHash = 0;   // PS del draw en curso (diagnostico)
 UINT g_descCursor = 0;
 uint64_t g_frameCounter = 0;
 ComPtr<ID3DBlob> g_rectGs, g_rectGsPano, g_panoGs;   // sesion 25: GS del panoramico
+// Sesion 27 (panoramico): el GS marca en g_panoFlag[frame] si dibujo un fondo de borde a borde centrado (modo 4). Ese frame es
+// un menu: unos frames despues (al reutilizar el indice) las piezas estrechas pegadas a un borde se centran con el fondo en vez de
+// quedarse en el borde de la pantalla (en las canciones no hay fondos asi y siguen pegadas: tiras de la vineta).
+ComPtr<ID3D12Resource> g_panoFlag[3], g_panoFlagRb[3];
+float g_panoMenu = 0;
+int g_panoMenuHold = 0;                  // sesion 28: frames que sigue siendo menu tras la ultima marca (los menus alternan tipos de frame)
+std::atomic<bool> g_panoMenu3D{ false };
+struct PanoDrawInfo { uint64_t vs, ps; uint32_t tex0, tex0sz; };
+std::vector<PanoDrawInfo> g_panoDraws[3];   // GH6_PANOLOG4 (diagnostico): draws del frame en superficies anchas, por indice de frame // sesion 28: menu con la escena 3D comprimida al centro (la camara del juego va a 16:9)
 // ---- EDRAM (sesion 9): un RT por (base, pitch) ----
 // Sesion 21: cada superficie tiene el formato de RB_COLOR_INFO (bits 16-19), no siempre BGRA8
 struct EdramRt
@@ -331,11 +344,18 @@ float4 ps_cas(V i) : SV_Target
 }
 )";
 // Suavizado de bordes en la presentacion (sesion 24): GH6_SUAVIZADO=fxaa|no (lo pone el launcher; por defecto fxaa)
-int AaMode() { static int m = [] { const char* v = getenv("GH6_SUAVIZADO"); return (v && (!_stricmp(v, "no") || !_stricmp(v, "0"))) ? 0 : 1; }(); return m; }
+int AaMode() { static int m = [] { const char* v = getenv("GH6_SUAVIZADO"); return (v && (!_stricmp(v, "no") || !_stricmp(v, "0"))) ? 0 : (v && !_stricmp(v, "smaa")) ? 2 : 1; }(); return m; }   // 0 no, 1 FXAA, 2 SMAA
 // Nitidez CAS (GH6_NITIDEZ=0..1, 0 = desactivada; por defecto 0.4) y filtrado anisotropico de texturas (GH6_ANISO=1/2/4/8/16)
 float CasSharp() { static float v = [] { const char* e = getenv("GH6_NITIDEZ"); float f = e ? (float)atof(e) : 0.4f; return f < 0 ? 0.0f : f > 1 ? 1.0f : f; }(); return v; }
 UINT AnisoLevel() { static UINT v = [] { const char* e = getenv("GH6_ANISO"); int a = e ? atoi(e) : 16; return (UINT)(a >= 16 ? 16 : a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 1); }(); return v; }
 ComPtr<ID3D12PipelineState> g_fxaaPso, g_casPso;
+// Sesion 28: SMAA 1x (iryoku/smaa, MIT): bordes por luminancia -> pesos de mezcla (tablas AreaTex/SearchTex) -> mezcla con los vecinos.
+// SRV fijos: 24 bordes, 25 AreaTex, 26 SearchTex (tabla de la 2a pasada); 28 + 2*frame = imagen y 29 + 2*frame = pesos (3a pasada).
+ComPtr<ID3D12RootSignature> g_smaaRootSig;
+ComPtr<ID3D12PipelineState> g_smaaEdgePso, g_smaaBlendPso, g_smaaNeighPso;
+ComPtr<ID3D12Resource> g_smaaEdges, g_smaaWeights, g_smaaArea, g_smaaSearch;
+ComPtr<ID3D12DescriptorHeap> g_smaaRtvHeap;
+UINT g_smaaW = 0, g_smaaH = 0; bool g_smaaTablesUp = false;
 // Texturas intermedias del posproceso (0 = tras FXAA, 1 = tras CAS), mismo tamano que la imagen resuelta; SRV fijos 20 y 21
 ComPtr<ID3D12Resource> g_ppTex[2];
 ComPtr<ID3D12DescriptorHeap> g_ppRtvHeap;
@@ -367,6 +387,9 @@ void main(triangle XVSOut v[3], inout TriangleStream<XVSOut> s)
     XVSOut d;
     d.pos = v[a].pos + v[b].pos - v[c].pos;
     [unroll] for (int i = 0; i < 16; i++) d.t[i] = v[a].t[i] + v[b].t[i] - v[c].t[i];
+#ifdef XPANO_DIM
+    d.pano = v[a].pano;
+#endif
     s.Append(v[c]); s.Append(v[a]); s.Append(v[b]); s.Append(d);
 }
 )";
@@ -376,44 +399,89 @@ void main(triangle XVSOut v[3], inout TriangleStream<XVSOut> s)
 // elementos anclados) se queda pegado a ese borde sin estirarse; si no, es una pieza de la interfaz y se comprime hacia el centro
 // (todas las piezas igual, como en 16:9). XPanoMode = 2: el draw lee la escena (resolve) -> nunca se toca.
 const char* kPanoGsCommon = R"(
-cbuffer XPano : register(b1) { float XPanoK; float XPanoMode; };
-// 0 = no tocar; 1 = comprimir al centro; 2 = pegado al borde izquierdo; 3 = pegado al derecho (sin estirarse)
+cbuffer XPano : register(b1) { float XPanoK; float XPanoMode; float XPanoMenu; float XPanoDraw; };
+RWByteAddressBuffer XPanoFlag : register(u0);
+// 0 = no tocar; 1 = comprimir al centro; 2 = pegado al borde izquierdo; 3 = pegado al derecho (sin estirarse);
+// 4 = fondo de borde a borde: centrado y los lados se rellenan alargando su borde (tapa la escena 3D que el juego deja detras)
 int PanoMode(float4 a, float4 b, float4 c)
 {
-    if (XPanoK <= 1.0 || XPanoMode > 1.5) return 0;
-    if (abs(a.w - 1.0) > 1e-5 || abs(b.w - 1.0) > 1e-5 || abs(c.w - 1.0) > 1e-5) return 0;
-    float xmin = min(min(a.x, b.x), c.x), xmax = max(max(a.x, b.x), c.x);
-    bool l = xmin <= -0.99, r = xmax >= 0.99;
-    if (l && r) return 0;
-    // de un borde justo hasta el centro: mitad de un efecto de pantalla completa (la vineta va en dos mitades) -> se estira
-    if ((l && abs(xmax) <= 0.02) || (r && abs(xmin) <= 0.02)) return 0;
-    // tira estrecha pegada a un borde (tiras de la vineta, elementos anclados) -> pegada a ese borde sin estirarse.
-    // Las piezas anchas (arte del menu principal y de la pantalla de guardado, partido en trozos grandes) se comprimen
-    // al centro todas igual para que encajen como en 16:9.
-    if ((l || r) && xmax - xmin < 0.6) return l ? 2 : 3;
-    return 1;
+    int m = 0;
+    bool ortho = abs(a.w - 1.0) <= 1e-5 && abs(b.w - 1.0) <= 1e-5 && abs(c.w - 1.0) <= 1e-5;
+    if (XPanoK > 1.0 && XPanoMode < 1.5 && ortho)
+    {
+        float xmin = min(min(a.x, b.x), c.x), xmax = max(max(a.x, b.x), c.x);
+        bool l = xmin <= -0.99, r = xmax >= 0.99;
+        m = 1;
+        // de borde a borde: si lleva una textura normal es arte de fondo (pergamino del lobby, mapa de Quest, pantallas de carga,
+        // videos) y se centra como en 16:9 con franjas negras (modo 4); sin textura es un fundido / efecto y se estira (sesion 27)
+        // sesion 28: solo con una textura de tamano de arte (>= 128 px); una pequena estirada (la vineta roja de peligro en las
+        // canciones, 64x64) es un efecto y se estira: antes se centraba y tapaba los lados con franjas negras
+        // XPanoMode 1.25 = textura renderizada en una superficie estrecha (retratos del lobby): pieza de interfaz, pero de borde a
+        // borde (bloom, desenfoque) se sigue estirando
+        if (l && r) m = (XPanoMode > 0.9 && XPanoMode < 1.2) ? 4 : 0;
+        // de un borde justo hasta el centro: mitad de un efecto de pantalla completa (la vineta va en dos mitades) -> se estira
+        else if ((l && abs(xmax) <= 0.02) || (r && abs(xmin) <= 0.02)) m = 0;
+        // tira estrecha pegada a un borde (tiras de la vineta, elementos anclados) -> pegada a ese borde sin estirarse; en un menu
+        // (hay fondo centrado) va con el fondo. Las piezas anchas (arte del menu en trozos grandes) se comprimen al centro.
+        else if ((l || r) && xmax - xmin < 0.6) m = XPanoMenu > 0.5 ? 1 : (l ? 2 : 3);
+    }
+    // sesion 28: en los menus (hay fondo centrado) la camara del juego vuelve a 16:9 y la escena 3D se comprime al centro con la
+    // interfaz: el personaje de Select/Edit Rocker queda dentro de su marco como en 16:9 (con la camara a 32:9 se salia por la derecha)
+    else if (XPanoK > 1.0 && !ortho && XPanoMenu > 1.5) m = 5;
+    if (m == 4) { XPanoFlag.Store(0, 1u); XPanoFlag.Store(4, asuint(XPanoDraw)); }   // este frame es un menu (lo lee la CPU unos frames despues); + que draw
+    return m;
 }
-float PanoX(float x, int m) { return m == 1 ? x / XPanoK : m == 2 ? -1.0 + (x + 1.0) / XPanoK : m == 3 ? 1.0 - (1.0 - x) / XPanoK : x; }
+float PanoX(float x, int m) { return (m == 1 || m == 4 || m == 5) ? x / XPanoK : m == 2 ? -1.0 + (x + 1.0) / XPanoK : m == 3 ? 1.0 - (1.0 - x) / XPanoK : x; }
 // salida con recorte: lo que en 16:9 caia fuera de la pantalla (trozos del arte del menu) tambien queda fuera al comprimir
-struct XPanoOut { float4 pos : SV_Position; float4 t[16] : TEXCOORD0; float2 clip : SV_ClipDistance0; };
+struct XPanoOut { float4 pos : SV_Position; float4 t[16] : TEXCOORD0; float pano : PANODIM; float2 clip : SV_ClipDistance0; };
 XPanoOut PanoOut(XVSOut v, int m)
 {
-    XPanoOut o; o.pos = v.pos; o.t = v.t;
+    XPanoOut o; o.pos = v.pos; o.t = v.t; o.pano = v.pano;
     o.pos.x = PanoX(v.pos.x, m);
-    o.clip = m == 0 ? float2(1.0, 1.0) : float2(o.pos.x - PanoX(-1.0, m), PanoX(1.0, m) - o.pos.x);   // m != 0 -> w = 1
+    o.clip = m == 0 ? float2(1.0, 1.0) : float2(o.pos.x - PanoX(-1.0, m), PanoX(1.0, m) - o.pos.x);   // m 1-4 -> w = 1
+    if (m == 5) o.clip = float2(o.pos.x + v.pos.w / XPanoK, v.pos.w / XPanoK - o.pos.x);   // 3D: recorte como el borde de 16:9
     return o;
 }
+// Tira lateral del modo 4: el vertice v (en el borde de la pantalla) colocado en x, sin recorte
+XPanoOut PanoSide(XVSOut v, float x) { XPanoOut o; o.pos = v.pos; o.t = v.t; o.pano = 0.0; o.pos.x = x; o.clip = float2(1.0, 1.0); return o; }   // franja en negro
+// Rellena el lado izquierdo (side = -1) o derecho (side = 1) con los dos vertices de ese borde, con el mismo sentido de giro que
+// el triangulo original (por si el draw tiene culling)
+void PanoStrip(XVSOut a, XVSOut c, float side, float orient, inout TriangleStream<XPanoOut> s)
+{
+    float xi = side / XPanoK;
+    float2 p0 = float2(side, a.pos.y), p1 = float2(xi, a.pos.y), p2 = float2(side, c.pos.y);
+    float o = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
+    if (o * orient < 0.0) { XVSOut t = a; a = c; c = t; }
+    // color uniforme: el del centro del borde (sin rayas); solo cambia la posicion de cada vertice
+    XVSOut ma = a, mc = c;
+    [unroll] for (int i = 0; i < 16; i++) { float4 m = (a.t[i] + c.t[i]) * 0.5; ma.t[i] = m; mc.t[i] = m; }
+    s.Append(PanoSide(ma, side)); s.Append(PanoSide(ma, xi)); s.Append(PanoSide(mc, side)); s.Append(PanoSide(mc, xi));
+    s.RestartStrip();
+}
+float PanoOrient(float4 a, float4 b, float4 c) { return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x); }
 )";
 const char* kPanoGsHlsl = R"(
-[maxvertexcount(3)]
+[maxvertexcount(11)]
 void main(triangle XVSOut v[3], inout TriangleStream<XPanoOut> s)
 {
     int m = PanoMode(v[0].pos, v[1].pos, v[2].pos);
     [unroll] for (int i = 0; i < 3; i++) s.Append(PanoOut(v[i], m));
+    if (m == 4)
+    {
+        s.RestartStrip();
+        float orient = PanoOrient(v[0].pos, v[1].pos, v[2].pos);
+        [unroll] for (int sd = 0; sd < 2; sd++)
+        {
+            float side = sd == 0 ? -1.0 : 1.0;
+            int e0 = -1, e1 = -1;
+            [unroll] for (int i = 0; i < 3; i++) if (v[i].pos.x * side >= 0.99) { if (e0 < 0) e0 = i; else e1 = i; }
+            if (e1 >= 0) PanoStrip(v[e0], v[e1], side, orient, s);   // este triangulo tiene el borde entero de ese lado
+        }
+    }
 }
 )";
 const char* kRectGsPanoHlsl = R"(
-[maxvertexcount(4)]
+[maxvertexcount(12)]
 void main(triangle XVSOut v[3], inout TriangleStream<XPanoOut> s)
 {
     float2 p0 = v[0].pos.xy / v[0].pos.w, p1 = v[1].pos.xy / v[1].pos.w, p2 = v[2].pos.xy / v[2].pos.w;
@@ -424,8 +492,22 @@ void main(triangle XVSOut v[3], inout TriangleStream<XPanoOut> s)
     XVSOut d;
     d.pos = v[a].pos + v[b].pos - v[c].pos;
     [unroll] for (int i = 0; i < 16; i++) d.t[i] = v[a].t[i] + v[b].t[i] - v[c].t[i];
+    d.pano = v[a].pano;
     int m = PanoMode(v[0].pos, v[1].pos, v[2].pos);
     s.Append(PanoOut(v[c], m)); s.Append(PanoOut(v[a], m)); s.Append(PanoOut(v[b], m)); s.Append(PanoOut(d, m));
+    if (m == 4)
+    {
+        s.RestartStrip();
+        XVSOut q[4] = { v[c], v[a], v[b], d };
+        float orient = PanoOrient(q[0].pos, q[1].pos, q[2].pos);
+        [unroll] for (int sd = 0; sd < 2; sd++)
+        {
+            float side = sd == 0 ? -1.0 : 1.0;
+            int e0 = -1, e1 = -1;
+            [unroll] for (int i = 0; i < 4; i++) if (q[i].pos.x * side >= 0.99) { if (e0 < 0) e0 = i; else e1 = i; }
+            if (e1 >= 0) PanoStrip(q[e0], q[e1], side, orient, s);
+        }
+    }
 }
 )";
 
@@ -870,9 +952,20 @@ bool Init(HWND hwnd)
     LOG("[d3d12] filtrado de texturas: %s (x%u)", AnisoLevel() > 1 ? "anisotropico" : "trilineal", AnisoLevel());
     if (Pano())
     {   // sesion 25: constantes del GS del panoramico (escala y modo de la interfaz)
-        D3D12_ROOT_PARAMETER dp5[5]; for (int i = 0; i < 4; i++) dp5[i] = dp[i];
-        dp5[4] = {}; dp5[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; dp5[4].Constants = { 1, 0, 2 }; dp5[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
-        g_drawRootSig = MakeRootSig({ 5, dp5, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
+        D3D12_ROOT_PARAMETER dp5[6]; for (int i = 0; i < 4; i++) dp5[i] = dp[i];
+        dp5[4] = {}; dp5[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; dp5[4].Constants = { 1, 0, 4 }; dp5[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+        dp5[5] = {}; dp5[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV; dp5[5].Descriptor = { 0, 0 }; dp5[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+        g_drawRootSig = MakeRootSig({ 6, dp5, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
+        for (int i = 0; i < 3; i++)
+        {   // marca del GS (u0) y su copia legible por la CPU
+            D3D12_HEAP_PROPERTIES dh{ D3D12_HEAP_TYPE_DEFAULT }, rh{ D3D12_HEAP_TYPE_READBACK };
+            D3D12_RESOURCE_DESC fd{}; fd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; fd.Width = 256; fd.Height = 1; fd.DepthOrArraySize = 1; fd.MipLevels = 1;
+            fd.SampleDesc.Count = 1; fd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            D3D12_RESOURCE_DESC rd = fd;
+            fd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            g_dev->CreateCommittedResource(&dh, D3D12_HEAP_FLAG_NONE, &fd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&g_panoFlag[i]));
+            g_dev->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_panoFlagRb[i]));
+        }
     }
     else g_drawRootSig = MakeRootSig({ 4, dp, 2, ds, D3D12_ROOT_SIGNATURE_FLAG_NONE });
     if (!g_blitRootSig || !g_drawRootSig) { g_failed = true; return false; }
@@ -880,11 +973,11 @@ bool Init(HWND hwnd)
     // GH6_UPSCALE=bilineal: escalado bilineal (antes); por defecto Catmull-Rom
     static const bool bilinear = getenv("GH6_UPSCALE") && !strcmp(getenv("GH6_UPSCALE"), "bilineal");
     auto vs = Compile(kBlitHlsl, "vs_main", "vs_5_0", "blit"), ps = Compile(kBlitHlsl, bilinear ? "ps_main" : "ps_cubic", "ps_5_0", "blit");
-    g_rectGs = Compile(std::string(kXenosInterfaceHlsl) + kRectGsHlsl, "main", "gs_5_0", "rectlist_gs");
+    g_rectGs = Compile(XenosInterface() + kRectGsHlsl, "main", "gs_5_0", "rectlist_gs");
     if (Pano())
     {
-        g_rectGsPano = Compile(std::string(kXenosInterfaceHlsl) + kPanoGsCommon + kRectGsPanoHlsl, "main", "gs_5_0", "rectlist_gs_pano");
-        g_panoGs = Compile(std::string(kXenosInterfaceHlsl) + kPanoGsCommon + kPanoGsHlsl, "main", "gs_5_0", "pano_gs");
+        g_rectGsPano = Compile(XenosInterface() + kPanoGsCommon + kRectGsPanoHlsl, "main", "gs_5_1", "rectlist_gs_pano");   // 5.1: UAV en el GS
+        g_panoGs = Compile(XenosInterface() + kPanoGsCommon + kPanoGsHlsl, "main", "gs_5_1", "pano_gs");
         if (!g_rectGsPano || !g_panoGs) LOG("[d3d12] panoramico: no se compilaron los GS de la interfaz");
     }
     if (!vs || !ps) { g_failed = true; return false; }
@@ -897,7 +990,61 @@ bool Init(HWND hwnd)
     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_B8G8R8A8_UNORM; pd.SampleDesc.Count = 1;
     if (!Check(g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_blitPso)), "CreateGraphicsPipelineState")) return false;
-    if (AaMode())
+    if (AaMode() == 2)
+    {   // SMAA: firma con 4 constantes (SMAA_RT_METRICS) y una tabla de 3 SRV; muestreadores lineal (s0) y punto (s1) recortando
+        D3D12_ROOT_PARAMETER sp[2]{};
+        sp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS; sp[0].Constants = { 0, 0, 4 }; sp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_DESCRIPTOR_RANGE sr3{ D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0, 0 };
+        sp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE; sp[1].DescriptorTable = { 1, &sr3 }; sp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC ss[2] = { samp, samp };
+        ss[0].Filter = D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT; ss[1].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT; ss[1].ShaderRegister = 1;
+        g_smaaRootSig = MakeRootSig({ 2, sp, 2, ss, D3D12_ROOT_SIGNATURE_FLAG_NONE });
+        std::string smaa;
+        for (const char* part : kSmaaHlslParts) smaa += part;
+        for (auto [a, b] : { std::pair<const char*, const char*>{ "SamplerState LinearSampler {", "SamplerState LinearSampler : register(s0) {" },
+                             std::pair<const char*, const char*>{ "SamplerState PointSampler {", "SamplerState PointSampler : register(s1) {" } })
+        { size_t q = smaa.find(a); if (q != std::string::npos) smaa.replace(q, strlen(a), b); }
+        std::string pre = "cbuffer SmaaCB : register(b0) { float4 g_smaaMetrics; };\n#define SMAA_RT_METRICS g_smaaMetrics\n#define SMAA_HLSL_4_1\n#define SMAA_PRESET_HIGH\n" + smaa +
+            "\nfloat2 FsTri(uint id, out float4 pos) { float2 uv = float2((id << 1) & 2, id & 2); pos = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return uv; }\n";
+        std::string edge = pre + R"(
+Texture2D colorTex : register(t0);
+void vs_main(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0, out float4 off[3] : TEXCOORD1) { uv = FsTri(id, pos); SMAAEdgeDetectionVS(uv, off); }
+float2 ps_main(float4 pos : SV_Position, float2 uv : TEXCOORD0, float4 off[3] : TEXCOORD1) : SV_Target { return SMAALumaEdgeDetectionPS(uv, off, colorTex); }
+)";
+        std::string blend = pre + R"(
+Texture2D edgesTex : register(t0); Texture2D areaTex : register(t1); Texture2D searchTex : register(t2);
+void vs_main(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0, out float2 pix : TEXCOORD1, out float4 off[3] : TEXCOORD2) { uv = FsTri(id, pos); SMAABlendingWeightCalculationVS(uv, pix, off); }
+float4 ps_main(float4 pos : SV_Position, float2 uv : TEXCOORD0, float2 pix : TEXCOORD1, float4 off[3] : TEXCOORD2) : SV_Target { return SMAABlendingWeightCalculationPS(uv, pix, off, edgesTex, areaTex, searchTex, 0); }
+)";
+        std::string neigh = pre + R"(
+Texture2D colorTex : register(t0); Texture2D blendTex : register(t1);
+void vs_main(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0, out float4 off : TEXCOORD1) { uv = FsTri(id, pos); SMAANeighborhoodBlendingVS(uv, off); }
+float4 ps_main(float4 pos : SV_Position, float2 uv : TEXCOORD0, float4 off : TEXCOORD1) : SV_Target { return SMAANeighborhoodBlendingPS(uv, off, colorTex, blendTex); }
+)";
+        auto mk = [&](const std::string& src, const char* name, DXGI_FORMAT fmt, ComPtr<ID3D12PipelineState>& out) {
+            auto v = Compile(src, "vs_main", "vs_5_0", name), f = Compile(src, "ps_main", "ps_5_0", name);
+            if (!v || !f || !g_smaaRootSig) return;
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC d = pd; d.pRootSignature = g_smaaRootSig.Get();
+            d.VS = { v->GetBufferPointer(), v->GetBufferSize() }; d.PS = { f->GetBufferPointer(), f->GetBufferSize() }; d.RTVFormats[0] = fmt;
+            g_dev->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&out));
+        };
+        mk(edge, "smaa_bordes", DXGI_FORMAT_R8G8_UNORM, g_smaaEdgePso);
+        mk(blend, "smaa_pesos", DXGI_FORMAT_R8G8B8A8_UNORM, g_smaaBlendPso);
+        mk(neigh, "smaa_mezcla", DXGI_FORMAT_B8G8R8A8_UNORM, g_smaaNeighPso);
+        // tablas de SMAA (se suben en el primer frame)
+        D3D12_HEAP_PROPERTIES dh{ D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.DepthOrArraySize = 1; td.MipLevels = 1; td.SampleDesc.Count = 1;
+        td.Width = AREATEX_WIDTH; td.Height = AREATEX_HEIGHT; td.Format = DXGI_FORMAT_R8G8_UNORM;
+        g_dev->CreateCommittedResource(&dh, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_smaaArea));
+        td.Width = SEARCHTEX_WIDTH; td.Height = SEARCHTEX_HEIGHT; td.Format = DXGI_FORMAT_R8_UNORM;
+        g_dev->CreateCommittedResource(&dh, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_smaaSearch));
+        if (g_smaaArea) g_dev->CreateShaderResourceView(g_smaaArea.Get(), nullptr, SrvCpu(25));
+        if (g_smaaSearch) g_dev->CreateShaderResourceView(g_smaaSearch.Get(), nullptr, SrvCpu(26));
+        D3D12_DESCRIPTOR_HEAP_DESC rh{}; rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rh.NumDescriptors = 2;
+        g_dev->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&g_smaaRtvHeap));
+        LOG("[d3d12] suavizado de bordes: %s", g_smaaEdgePso && g_smaaBlendPso && g_smaaNeighPso && g_smaaArea && g_smaaSearch ? "SMAA" : "SMAA no disponible (fallo al compilar)");
+    }
+    if (AaMode() == 1)
     {
         auto fps = Compile(kBlitHlsl, "ps_fxaa", "ps_5_0", "fxaa");
         if (fps) { pd.PS = { fps->GetBufferPointer(), fps->GetBufferSize() }; g_dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&g_fxaaPso)); }
@@ -1082,6 +1229,13 @@ struct TexAlloc { int heap = -1; UINT64 off = 0, size = 0; };
 std::vector<TexAlloc> g_texFree;                       // huecos libres (ya sin uso en la GPU)
 std::vector<TexAlloc> g_texFreeDeferred[kFrames];      // huecos que se liberan cuando la GPU acabe ese frame
 void TexEvict();
+void CopyPanoFlag()
+{   // sesion 27: marca de menu del GS -> memoria legible (se lee al volver a usar este indice de frame)
+    if (!g_panoFlag[g_fi]) return;
+    auto b1 = Transition(g_panoFlag[g_fi].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE); g_list->ResourceBarrier(1, &b1);
+    g_list->CopyBufferRegion(g_panoFlagRb[g_fi].Get(), 0, g_panoFlag[g_fi].Get(), 0, 8);
+    auto b2 = Transition(g_panoFlag[g_fi].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); g_list->ResourceBarrier(1, &b2);
+}
 void OpenFrame()
 {
     if (g_frameOpen) return;
@@ -1093,6 +1247,29 @@ void OpenFrame()
     g_ringOffset = 0;
     g_vbCache.clear();
     g_deferredRelease[g_fi].clear();   // la GPU ya termino el frame que uso este indice
+    bool clearPanoDraws = true;
+    if (g_panoFlag[g_fi])
+    {   // sesion 27: marca de menu del frame anterior con este indice (escrita por el GS, copiada al cerrar el frame)
+        uint32_t* m = nullptr; D3D12_RANGE rr{ 0, 8 };
+        if (SUCCEEDED(g_panoFlagRb[g_fi]->Map(0, &rr, (void**)&m)) && m)
+        {
+            if (*m) g_panoMenuHold = 8; else if (g_panoMenuHold > 0) g_panoMenuHold--;
+            static const bool p4 = getenv("GH6_PANOLOG4") != nullptr;
+            if (p4 && *m && m[1] < g_panoDraws[g_fi].size())
+            {   // que draw dibujo un fondo de borde a borde (modo 4) en ese frame
+                static std::unordered_map<uint64_t, int> seen4; const PanoDrawInfo& di = g_panoDraws[g_fi][m[1]];
+                static const long long p4from = atoll(getenv("GH6_PANOLOG4")); static int p4n = 0;
+                if ((p4from > 1 ? ((long long)g_frameCounter >= p4from && p4n++ < 30) : (seen4[di.ps ^ (di.vs << 1)]++ == 0 && seen4.size() < 64))) LOG("[pano4] frame %llu: draw %u VS %016llX PS %016llX tf0 %08X %ux%u", (unsigned long long)g_frameCounter, m[1], (unsigned long long)di.vs, (unsigned long long)di.ps, di.tex0, (di.tex0sz & 0x1FFF) + 1, ((di.tex0sz >> 13) & 0x1FFF) + 1);
+            }
+            g_panoMenu = g_panoMenuHold > 0 ? 1.0f : 0.0f;
+            static const bool no3d = getenv("GH6_PANO3D") && atoi(getenv("GH6_PANO3D")) == 0;   // GH6_PANO3D=0: escena 3D ancha tambien en menus
+            bool was3D = g_panoMenu3D;
+            g_panoMenu3D = !no3d && g_panoMenu > 0.5f;
+            { static int nlog = 0; if (was3D != g_panoMenu3D && nlog++ < 200) LOG("[pano] frame %llu: %s", (unsigned long long)g_frameCounter, g_panoMenu3D ? "menu (camara 16:9, escena 3D al centro)" : "escena 3D a todo el ancho"); }
+            D3D12_RANGE wr{ 0, 0 }; g_panoFlagRb[g_fi]->Unmap(0, &wr);
+        }
+    }
+    if (clearPanoDraws && g_fi < 3) g_panoDraws[g_fi].clear();
     for (auto& a : g_texFreeDeferred[g_fi]) g_texFree.push_back(a);
     g_texFreeDeferred[g_fi].clear();
     TexEvict();
@@ -1108,6 +1285,13 @@ void OpenFrame()
         CheckedCopy(&dst, 0, 0, 0, &src, nullptr);
         auto b = Transition(g_white.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         g_list->ResourceBarrier(1, &b);
+    }
+    if (g_panoFlag[g_fi])
+    {   // marca a 0 para este frame (copia de 4 bytes a 0 desde el anillo de subida)
+        UINT64 o = RingAlloc(4, 256); *(uint32_t*)(g_ringMap[g_fi] + o) = 0;
+        auto b1 = Transition(g_panoFlag[g_fi].Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST); g_list->ResourceBarrier(1, &b1);
+        g_list->CopyBufferRegion(g_panoFlag[g_fi].Get(), 0, g_ring[g_fi].Get(), o, 4);
+        auto b2 = Transition(g_panoFlag[g_fi].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS); g_list->ResourceBarrier(1, &b2);
     }
     g_boundRt = nullptr;
     g_frameOpen = true;
@@ -2366,6 +2550,15 @@ void FlushResolvesIfOverlap(uint32_t lo, uint32_t hi)
 
 } // namespace
 
+// Buffer de lectura para resolves por CPU y capturas (se crea al primer uso)
+void EnsureReadback()
+{
+    if (g_readback) return;
+    D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = 2048ull * 16 * kEdramH * Rs() * Rs() * (Pano() ? 2 : 1); bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
+    g_dev->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_readback));
+}
 void Resolve()
 {
     uint32_t ctrl = Reg(0x2318), destBase = Reg(0x2319), destPitchReg = Reg(0x231A), destInfo = Reg(0x231B);
@@ -2774,13 +2967,7 @@ depthCpu:
                 why.clear();
             }
         }
-        if (!g_readback)
-        {
-            D3D12_RESOURCE_DESC bd{}; bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bd.Width = 2048ull * 16 * kEdramH * Rs() * Rs() * (Pano() ? 2 : 1); bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
-            bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-            D3D12_HEAP_PROPERTIES rb{ D3D12_HEAP_TYPE_READBACK };
-            g_dev->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&g_readback));
-        }
+        EnsureReadback();
         const UINT wsx = (UINT)std::max(1, std::min(SX(x1), (int)rt->w) - SX(x0));   // ancho en la superficie (sesion 25)
         UINT rowPitch = (wsx * rt->bpp + 255) & ~255u;
         // Desactivado por defecto: con el diferido el juego se cerraba al cargar un escenario (las copias tardias llegan
@@ -3616,6 +3803,14 @@ static void D3D12DrawImpl(const XenosDraw& d)
         const float msxK = msx * rt->kx;   // panoramico (sesion 25)
         sr.left = std::min<LONG>((LONG)std::lround(tlx * msxK), (LONG)rt->w); sr.top = std::min<LONG>(tly * (LONG)msy, (LONG)rt->h);
         sr.right = std::min<LONG>((LONG)std::lround(brx * msxK), (LONG)rt->w); sr.bottom = std::min<LONG>(bry * (LONG)msy, (LONG)rt->h);
+        // Sesion 28 (panoramico): en los menus la interfaz se comprime al centro; un recorte que no ocupa todo el ancho (la lista de
+        // la ranura del lobby: Play Quickplay+ / Difficulty / Instrument) se comprime igual, si no el texto quedaba fuera y no se veia
+        static const bool noPanoScissor = getenv("GH6_NOPANOSCISSOR") != nullptr;
+        if (!noPanoScissor && Pano() && rt->kx > 1.001f && g_panoMenu > 0.5f && (sr.left > 0 || sr.right < (LONG)rt->w))
+        {
+            const float c = rt->w * 0.5f;
+            sr.left = (LONG)std::floor(c + (sr.left - c) / rt->kx); sr.right = (LONG)std::ceil(c + (sr.right - c) / rt->kx);
+        }
     }
     g_list->RSSetViewports(1, &vp); g_list->RSSetScissorRects(1, &sr);
     g_list->SetPipelineState(pso.Get());
@@ -3677,8 +3872,27 @@ static void D3D12DrawImpl(const XenosDraw& d)
                 // un efecto de pantalla) -> 2 = se estira con la superficie; solo texturas normales (arte de la interfaz) -> 1 = se comprime
                 // entera al centro (todas sus piezas igual, como en 16:9); sin texturas -> 0 = regla de los bordes (fundidos a pantalla completa).
                 uint32_t tm2 = ps.info.textureMask;
-                float pk[2] = { curRt->kx, (tm2 & g_texSlotScaled) ? 2.0f : tm2 ? 1.0f : 0.0f };
-                g_list->SetGraphicsRoot32BitConstants(4, 2, pk, 0);
+                static const bool p4 = getenv("GH6_PANOLOG4") != nullptr;
+                float drawId = 0;
+                if (p4 && g_fi < 3) { drawId = (float)g_panoDraws[g_fi].size(); g_panoDraws[g_fi].push_back({ d.vsHash, d.psHash, Reg(0x4800 + 1) & 0xFFFFF000, Reg(0x4800 + 2) }); }
+                float texKind = (tm2 & g_texSlotScaled) ? 2.0f : tm2 ? 1.0f : 0.0f;
+                if (texKind == 2.0f)
+                {   // sesion 28: solo es "la escena" si la textura viene de una superficie ancha; las de superficies estrechas (retratos
+                    // de 224x415 de las ranuras del lobby) son piezas de la interfaz y se comprimen con su marco (antes quedaban estiradas)
+                    bool wide = false;
+                    for (uint32_t t = 0; t < 16; t++) if (((tm2 & g_texSlotScaled) >> t) & 1) wide |= g_texSlotSx[t] > Rs() * 1.001f;
+                    if (!wide) texKind = 1.25f;
+                }
+                if (texKind == 1.0f && !(tm2 & g_texSlotScaled))
+                {   // sesion 28: textura normal pequena (< 128 px por lado) = efecto estirado, no arte de fondo -> 0.75
+                    uint32_t t0 = 0; while (t0 < 31 && !((tm2 >> t0) & 1)) t0++;
+                    uint32_t sz = Reg(0x4800 + t0 * 6 + 2), tw = (sz & 0x1FFF) + 1, th = ((sz >> 13) & 0x1FFF) + 1;
+                    if (t0 < 16 && std::min(tw, th) < 128) texKind = 0.75f;
+                }
+                float pk[4] = { curRt->kx, texKind, g_panoMenu3D ? 2.0f : g_panoMenu, 0 };   // 2 = menu + 3D comprimido
+                { uint32_t di = (uint32_t)drawId; memcpy(&pk[3], &di, 4); }
+                g_list->SetGraphicsRoot32BitConstants(4, 4, pk, 0);
+                if (g_panoFlag[g_fi]) g_list->SetGraphicsRootUnorderedAccessView(5, g_panoFlag[g_fi]->GetGPUVirtualAddress());
             }
         }
         g_list->SetGraphicsRootDescriptorTable(3, SrvGpu(baseSlot));
@@ -3932,6 +4146,66 @@ bool EnsurePpTex(UINT w, UINT h)
     LOG("[d3d12] texturas de posproceso %ux%u", w, h);
     return true;
 }
+// SMAA: texturas de bordes (RG8) y pesos (RGBA8) del tamano de la imagen; las tablas se suben la primera vez
+bool SmaaEnsure(UINT w, UINT h)
+{
+    if (!g_smaaEdgePso || !g_smaaBlendPso || !g_smaaNeighPso || !g_smaaArea || !g_smaaSearch || !g_smaaRtvHeap) return false;
+    if (!g_smaaTablesUp)
+    {
+        auto up = [](ID3D12Resource* res, const unsigned char* bytes, UINT w0, UINT h0, UINT pitch, DXGI_FORMAT fmt) {
+            UINT rp = (pitch + 255) & ~255u;
+            UINT64 o = RingAlloc(UINT64(rp) * h0, 512);
+            for (UINT y = 0; y < h0; y++) memcpy(g_ringMap[g_fi] + o + UINT64(y) * rp, bytes + y * pitch, pitch);
+            D3D12_TEXTURE_COPY_LOCATION dst{ res, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX }; dst.SubresourceIndex = 0;
+            D3D12_TEXTURE_COPY_LOCATION src{ g_ring[g_fi].Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT };
+            src.PlacedFootprint.Offset = o; src.PlacedFootprint.Footprint = { fmt, w0, h0, 1, rp };
+            CheckedCopy(&dst, 0, 0, 0, &src, nullptr);
+            auto b = Transition(res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b);
+        };
+        up(g_smaaArea.Get(), areaTexBytes, AREATEX_WIDTH, AREATEX_HEIGHT, AREATEX_PITCH, DXGI_FORMAT_R8G8_UNORM);
+        up(g_smaaSearch.Get(), searchTexBytes, SEARCHTEX_WIDTH, SEARCHTEX_HEIGHT, SEARCHTEX_PITCH, DXGI_FORMAT_R8_UNORM);
+        g_smaaTablesUp = true;
+    }
+    if (g_smaaEdges && g_smaaW == w && g_smaaH == h) return true;
+    if (g_smaaEdges) { FlushAndWait(); g_smaaEdges.Reset(); g_smaaWeights.Reset(); }
+    D3D12_HEAP_PROPERTIES def{ D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC td{}; td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; td.Width = w; td.Height = h; td.DepthOrArraySize = 1; td.MipLevels = 1;
+    td.SampleDesc.Count = 1; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    UINT inc = g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    ComPtr<ID3D12Resource>* tex[2] = { &g_smaaEdges, &g_smaaWeights };
+    const DXGI_FORMAT fmts[2] = { DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM };
+    for (int i = 0; i < 2; i++)
+    {
+        td.Format = fmts[i];
+        D3D12_CLEAR_VALUE cv{}; cv.Format = fmts[i];
+        if (FAILED(g_dev->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(tex[i]->GetAddressOf())))) return false;
+        auto rtv = g_smaaRtvHeap->GetCPUDescriptorHandleForHeapStart(); rtv.ptr += i * inc;
+        g_dev->CreateRenderTargetView(tex[i]->Get(), nullptr, rtv);
+    }
+    g_dev->CreateShaderResourceView(g_smaaEdges.Get(), nullptr, SrvCpu(24));
+    for (UINT f = 0; f < kFrames; f++) g_dev->CreateShaderResourceView(g_smaaWeights.Get(), nullptr, SrvCpu(29 + 2 * f));
+    g_smaaW = w; g_smaaH = h;
+    LOG("[d3d12] SMAA: texturas de %ux%u", w, h);
+    return true;
+}
+// Una pasada de SMAA a pantalla completa: escribe en res (por su RTV) leyendo la tabla de SRV que empieza en tableSlot
+void SmaaPass(ID3D12PipelineState* pso, ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE rtv, UINT tableSlot, bool clear, UINT w, UINT h)
+{
+    { auto b = Transition(res, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET); g_list->ResourceBarrier(1, &b); }
+    if (clear) { const float z[4] = { 0, 0, 0, 0 }; g_list->ClearRenderTargetView(rtv, z, 0, nullptr); }
+    g_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    D3D12_VIEWPORT vp{ 0, 0, (float)w, (float)h, 0, 1 }; D3D12_RECT sr{ 0, 0, (LONG)w, (LONG)h };
+    g_list->RSSetViewports(1, &vp); g_list->RSSetScissorRects(1, &sr);
+    g_list->SetPipelineState(pso);
+    g_list->SetGraphicsRootSignature(g_smaaRootSig.Get());
+    ID3D12DescriptorHeap* heaps[] = { g_srvHeap.Get() }; g_list->SetDescriptorHeaps(1, heaps);
+    const float m[4] = { 1.0f / w, 1.0f / h, (float)w, (float)h };
+    g_list->SetGraphicsRoot32BitConstants(0, 4, m, 0);
+    g_list->SetGraphicsRootDescriptorTable(1, SrvGpu(tableSlot));
+    g_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_list->DrawInstanced(3, 1, 0, 0);
+    { auto b = Transition(res, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); }
+}
 // Una pasada de posproceso: lee el SRV srcSlot y escribe en g_ppTex[idx]
 void PostPass(ID3D12PipelineState* pso, UINT srcSlot, int idx)
 {
@@ -3968,10 +4242,23 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
 {
     if (g_dev) FlushPendingResolves();
     if (g_failed || !g_dev || !hwnd || !fb) return false;
+    static const bool plog = getenv("GH6_PRESENTLOG") != nullptr; static int pfail = 0;
     auto last = g_resolvedLast.find(fb & 0xFFFFF000);
-    if (last == g_resolvedLast.end()) return false;
+    if (last == g_resolvedLast.end()) { if (plog && pfail++ < 40) LOG("[presentlog] fb %08X sin resolve", fb); return false; }
     auto it = g_resolved.find(last->second);
-    if (it == g_resolved.end() || !it->second.res || g_frameCounter - it->second.frame > 2) return false;
+    // Sesion 28: los videos (Bink) van a menos cuadros por segundo que la pantalla y el juego repite el mismo frontbuffer varios
+    // vsync sin volver a resolverlo. Antes, a los 2 cuadros se daba por viejo y se leia la memoria (en negro: el resolve fue por GPU)
+    // -> intro y cinematicas en negro. Ahora se sigue presentando mientras la CPU no haya reescrito esa memoria.
+    auto stale = [&](const ResolvedTex& t) {
+        if (g_frameCounter - t.frame <= 2) return false;
+        return !(t.inMemory || MemHash(t.destBase) == t.memHash);
+    };
+    if (it == g_resolved.end() || !it->second.res || stale(it->second))
+    {
+        if (plog && pfail++ < 40) LOG("[presentlog] fb %08X: %s frame %llu ahora %llu", fb, it == g_resolved.end() ? "sin textura" : !it->second.res ? "sin recurso" : "viejo",
+            it == g_resolved.end() ? 0ull : (unsigned long long)it->second.frame, (unsigned long long)g_frameCounter);
+        return false;
+    }
     ResolvedTex& r = it->second;
     OpenFrame();
     UINT fi = g_fi;
@@ -3983,14 +4270,27 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
                                           : D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(2, 1, 0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1);
     g_dev->CreateShaderResourceView(r.res.Get(), &sd, SrvCpu(3 + fi));
     // Sesion 24: posproceso a la resolucion del juego antes del escalado: FXAA (suavizado de bordes) y CAS (nitidez)
-    bool doFxaa = AaMode() && g_fxaaPso, doCas = g_casPso != nullptr;
+    bool doFxaa = AaMode() == 1 && g_fxaaPso, doCas = g_casPso != nullptr, doSmaa = AaMode() == 2 && g_smaaEdgePso;
     UINT curSlot = 3 + fi; int lastPp = -1;
-    if ((doFxaa || doCas) && EnsurePpTex(outW, outH))
+    if ((doFxaa || doCas || doSmaa) && EnsurePpTex(outW, outH))
     {
         if (doFxaa) { PostPass(g_fxaaPso.Get(), curSlot, 0); curSlot = kPpSrvSlot; lastPp = 0; }
+        if (doSmaa && SmaaEnsure(outW, outH))
+        {   // sesion 28: SMAA 1x -> g_ppTex[0]
+            UINT inc = g_dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            auto rtvE = g_smaaRtvHeap->GetCPUDescriptorHandleForHeapStart(), rtvW = rtvE; rtvW.ptr += inc;
+            SmaaPass(g_smaaEdgePso.Get(), g_smaaEdges.Get(), rtvE, curSlot, true, outW, outH);
+            SmaaPass(g_smaaBlendPso.Get(), g_smaaWeights.Get(), rtvW, 24, true, outW, outH);
+            g_dev->CreateShaderResourceView(r.res.Get(), &sd, SrvCpu(28 + 2 * fi));   // la imagen junto a sus pesos (tabla de la 3a pasada)
+            if (g_ppState[0] != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) { auto b = Transition(g_ppTex[0].Get(), g_ppState[0], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); g_ppState[0] = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE; }
+            auto rtv0 = g_ppRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            SmaaPass(g_smaaNeighPso.Get(), g_ppTex[0].Get(), rtv0, 28 + 2 * fi, false, outW, outH);
+            curSlot = kPpSrvSlot; lastPp = 0;
+        }
         if (doCas) { PostPass(g_casPso.Get(), curSlot, 1); curSlot = kPpSrvSlot + 1; lastPp = 1; }
     }
     bool aa = lastPp >= 0;
+    if (readback) EnsureReadback();   // sesion 28: antes solo existia tras el primer resolve por CPU (capturas del arranque en negro)
     if (readback)
     {
         // Copia a la CPU para la captura (con suavizado, la imagen suavizada: sus bytes ya estan en orden B G R)
@@ -4018,6 +4318,11 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
                         (*readback)[size_t(y) * outW + x] = b | (g << 8) | (rr << 16) | 0xFF000000u;
                     }
                 g_readback->Unmap(0, nullptr);
+                if (getenv("GH6_PRESENTLOG"))
+                {
+                    uint64_t sum = 0; for (uint32_t v : *readback) sum += (v & 0xFF) + ((v >> 8) & 0xFF) + ((v >> 16) & 0xFF);
+                    LOG("[presentlog] fb %08X res %ux%u sx %.2f frame %llu ahora %llu pp %d swapRB %d media %.2f", fb, r.w, r.h, r.sx, (unsigned long long)r.frame, (unsigned long long)g_frameCounter, lastPp, (int)r.swapRB, readback->empty() ? 0.0 : sum / (3.0 * readback->size()));
+                }
             }
         }
         else { auto b = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); g_list->ResourceBarrier(1, &b); }
@@ -4040,6 +4345,7 @@ bool D3D12PresentResolved(HWND hwnd, uint32_t fb, std::vector<uint32_t>* readbac
     DrawOverlays(fi);
     auto toPresent = Transition(g_backbuffers[fi].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     g_list->ResourceBarrier(1, &toPresent);
+    CopyPanoFlag();
     HRESULT phr = g_list->Close();
     if (SUCCEEDED(phr)) { ID3D12CommandList* lists[] = { g_list.Get() }; g_queue->ExecuteCommandLists(1, lists); }
     else { static int pn = 0; if (pn++ < 10) LOG("[d3d12] Close de la lista fallo al presentar (0x%08lX, draws %llu): se descarta", (unsigned long)phr, (unsigned long long)g_frameDraws); DumpCmdTrace(phr); }
@@ -4166,6 +4472,7 @@ bool D3D12Present(HWND hwnd, const uint32_t* pixels, uint32_t w, uint32_t h)
     if (useEdram) { auto b = Transition(g_edram.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET); g_list->ResourceBarrier(1, &b); }
     auto toPresent = Transition(g_backbuffers[fi].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
     g_list->ResourceBarrier(1, &toPresent);
+    CopyPanoFlag();
     HRESULT phr = g_list->Close();
     if (SUCCEEDED(phr)) { ID3D12CommandList* lists[] = { g_list.Get() }; g_queue->ExecuteCommandLists(1, lists); }
     else { static int pn = 0; if (pn++ < 10) LOG("[d3d12] Close de la lista fallo al presentar (0x%08lX, draws %llu): se descarta", (unsigned long)phr, (unsigned long long)g_frameDraws); DumpCmdTrace(phr); }
@@ -4190,3 +4497,5 @@ bool D3D12Present(HWND hwnd, const uint32_t* pixels, uint32_t w, uint32_t h)
 
 // Sesion 25: proporcion panoramica para la camara del juego (gpu_stub.cpp); 0 = 16:9
 float GH6PanoAspect() { return PanoAspectRaw(); }
+// Proporcion de la camara del juego: la panoramica, o 16:9 en los menus con la escena 3D comprimida al centro (sesion 28)
+float GH6PanoCameraAspect() { float a = PanoAspectRaw(); return (a > 0 && g_panoMenu3D) ? 16.0f / 9.0f : a; }

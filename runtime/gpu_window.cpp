@@ -318,6 +318,7 @@ void GpuPresent()
                 s = strchr(s, ','); if (s) s++;
             }
         }
+        if (name[0] && getenv("GH6_PRESENTLOG")) LOG("[presentlog] captura %s desde la memoria (fb %08X, ok %d)", name, GpuGetStats().frontbuffer.load(), (int)ok);
         if (name[0])
         {
             if (FILE* f = fopen(name, "wb"))

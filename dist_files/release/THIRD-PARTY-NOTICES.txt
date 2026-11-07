@@ -11,6 +11,11 @@ XenonRecomp (hedge-dev and contributors)
   Recompilador de PowerPC a C++ usado para generar el codigo del juego; incluye SIMDe (MIT).
   https://github.com/hedge-dev/XenonRecomp
 
+SMAA (Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez)
+  Licencia: MIT (texto completo en licenses\SMAA-MIT.txt). Shader SMAA.hlsl y tablas AreaTex/SearchTex sin modificar,
+  usados para el suavizado de bordes "SMAA".
+  https://github.com/iryoku/smaa
+
 Xenia (Ben Vanik and contributors)
   Licencia: BSD 3-Clause. Partes del comportamiento de la GPU (Xenos) y del kernel/XAM de Xbox 360
   se basan en la documentacion y el codigo de Xenia.

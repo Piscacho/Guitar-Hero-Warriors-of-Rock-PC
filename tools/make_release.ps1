@@ -29,6 +29,7 @@ Copy-Item "$bin\avcodec-62.dll", "$bin\avutil-60.dll", "$bin\swresample-6.dll" $
 Copy-Item "$R\dist_files\release\*" $stage
 Copy-Item "$R\toolchain\ffmpeg\LICENSE.txt" "$stage\licenses\FFmpeg-LGPL-3.0.txt"
 Copy-Item "$R\XenonRecomp\LICENSE.md" "$stage\licenses\XenonRecomp-MIT.txt"
+Copy-Item "$R\runtime\smaa\LICENSE.txt" "$stage\licenses\SMAA-MIT.txt"
 # gh6.ini de la release: sin rutas personales, partidas en save\
 $ini = Get-Content "$R\dist_files\gh6.ini" -Encoding UTF8
 $ini = $ini -replace '^iso=.*', 'iso=' -replace '^datos=.*', 'datos=save' -replace '^dlc=.*', 'dlc=dlc'
